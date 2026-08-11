@@ -1,0 +1,1 @@
+"""Catalog product extraction POC."""

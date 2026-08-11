@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Catalog Product Extraction</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <p class="brand">Product OCR</p>
+      <h1>Catalog &amp; pamphlet extractor</h1>
+      <p class="lede">
+        Three stages — parse structure, extract via tool call, then validate.
+        OCR never writes the final product record.
+      </p>
+    </header>
+
+    <section class="upload-panel" id="uploadPanel">
+      <form id="uploadForm">
+        <label class="dropzone" id="dropzone" for="fileInput">
+          <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff" hidden />
+          <span class="drop-title">Drop a catalog PDF or image</span>
+          <span class="drop-hint">or click to browse · PDF, PNG, JPG</span>
+          <span class="file-name" id="fileName"></span>
+        </label>
+        <button type="submit" id="submitBtn" disabled>Run pipeline</button>
+      </form>
+    </section>
+
+    <section class="pipeline" id="pipelineSection" hidden>
+      <h2>Pipeline</h2>
+      <ol class="stages" id="stageList">
+        <li data-stage="parse">
+          <span class="stage-num">1</span>
+          <div>
+            <strong>Document Parsing</strong>
+            <p>PaddleOCR + Docling → structure only</p>
+          </div>
+          <span class="badge" data-badge>pending</span>
+        </li>
+        <li data-stage="extract">
+          <span class="stage-num">2</span>
+          <div>
+            <strong>Product Extraction</strong>
+            <p>deepseek-v4-flash · forced <code>submit_products</code></p>
+          </div>
+          <span class="badge" data-badge>pending</span>
+        </li>
+        <li data-stage="validate">
+          <span class="stage-num">3</span>
+          <div>
+            <strong>Validation</strong>
+            <p>Schema + business rules → product records</p>
+          </div>
+          <span class="badge" data-badge>pending</span>
+        </li>
+      </ol>
+
+      <div class="live-progress" id="liveProgress">
+        <div class="progress-head">
+          <span class="progress-label">Live activity</span>
+          <span class="progress-pct" id="progressPct">0%</span>
+        </div>
+        <div class="progress-track" aria-hidden="true">
+          <div class="progress-fill" id="progressBar" style="width: 0%"></div>
+        </div>
+        <p class="progress-current" id="progressCurrent">Waiting to start…</p>
+        <ul class="progress-log" id="progressLog"></ul>
+      </div>
+
+      <p class="job-meta" id="jobMeta"></p>
+      <p class="error-box" id="errorBox" hidden></p>
+    </section>
+
+    <section class="results" id="resultsSection" hidden>
+      <div class="results-head">
+        <h2>Products</h2>
+        <div class="counts" id="counts"></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Name</th>
+              <th>Brand</th>
+              <th>SKU</th>
+              <th>Price</th>
+              <th>Page</th>
+              <th>Confidence</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody id="productBody"></tbody>
+        </table>
+      </div>
+
+      <details class="preview" id="parsedPreview">
+        <summary>Parsed document preview (Stage 1 — not products)</summary>
+        <pre id="parsedText"></pre>
+      </details>
+
+      <div class="artifacts" id="artifacts"></div>
+    </section>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
