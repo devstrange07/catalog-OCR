@@ -11,8 +11,18 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.config import OUTPUTS_DIR
+from app.models.document import ParsedDocument
 from app.models.pipeline import JobRecord, JobStatus, ProgressEvent, StageInfo, StageStatus
 from app.models.product import ProductStatus
+from app.stages.crawl import (
+    BinaryFetch,
+    CrawlError,
+    HtmlFetch,
+    crawl_result_to_artifact,
+    fetch_url,
+    normalize_url,
+    parsed_document_from_markdown,
+)
 from app.stages.extract import extract_products
 from app.stages.parse import parse_document
 from app.stages.validate import validate_products
@@ -22,6 +32,7 @@ logger = logging.getLogger(__name__)
 _jobs: dict[str, JobRecord] = {}
 _lock = threading.Lock()
 
+STAGE_CRAWL = "crawl"
 STAGE_PARSE = "parse"
 STAGE_EXTRACT = "extract"
 STAGE_VALIDATE = "validate"
@@ -48,12 +59,14 @@ def _write_json(path: Path, payload: Any) -> None:
     )
 
 
-def _default_stages() -> dict[str, StageInfo]:
-    return {
-        STAGE_PARSE: StageInfo(name="Document Parsing"),
-        STAGE_EXTRACT: StageInfo(name="Product Extraction"),
-        STAGE_VALIDATE: StageInfo(name="Validation"),
-    }
+def _default_stages(*, include_crawl: bool = False) -> dict[str, StageInfo]:
+    stages: dict[str, StageInfo] = {}
+    if include_crawl:
+        stages[STAGE_CRAWL] = StageInfo(name="URL Crawl")
+    stages[STAGE_PARSE] = StageInfo(name="Document Parsing")
+    stages[STAGE_EXTRACT] = StageInfo(name="Product Extraction")
+    stages[STAGE_VALIDATE] = StageInfo(name="Validation")
+    return stages
 
 
 def get_job(job_id: str) -> JobRecord | None:
@@ -139,13 +152,136 @@ def create_job_from_bytes(filename: str, data: bytes) -> JobRecord:
         filename=filename,
         status=JobStatus.queued,
         stages=_default_stages(),
-        meta={"source_path": str(path)},
+        meta={"source_path": str(path), "source_kind": "upload"},
     )
     with _lock:
         _jobs[job_id] = job
     _emit_progress(job_id, "pipeline", "queued", "Job queued — waiting to start…", percent=0)
     _write_json(dest_dir / "job.json", get_job(job_id).model_dump(mode="json"))  # type: ignore[union-attr]
     return get_job(job_id)  # type: ignore[return-value]
+
+
+def create_job_from_url(url: str) -> JobRecord:
+    cleaned = normalize_url(url)
+    job_id = uuid.uuid4().hex[:12]
+    dest_dir = _job_dir(job_id)
+    host = cleaned.split("://", 1)[-1].split("/", 1)[0]
+    filename = f"url:{host}"
+    job = JobRecord(
+        id=job_id,
+        filename=filename,
+        status=JobStatus.queued,
+        stages=_default_stages(include_crawl=True),
+        meta={"source_url": cleaned, "source_kind": "url"},
+    )
+    with _lock:
+        _jobs[job_id] = job
+    _emit_progress(job_id, "pipeline", "queued", "URL job queued — waiting to start…", percent=0)
+    _write_json(dest_dir / "job.json", get_job(job_id).model_dump(mode="json"))  # type: ignore[union-attr]
+    return get_job(job_id)  # type: ignore[return-value]
+
+
+def _fail_pipeline(job_id: str, exc: Exception, stage_order: list[str]) -> None:
+    logger.exception("Pipeline failed for job %s", job_id)
+    current = get_job(job_id)
+    failed_stage = None
+    if current:
+        for key, stage in current.stages.items():
+            if stage.status == StageStatus.running:
+                failed_stage = key
+                break
+    if failed_stage:
+        _set_stage(job_id, failed_stage, StageStatus.failed, error=str(exc))
+        if failed_stage in stage_order:
+            for key in stage_order[stage_order.index(failed_stage) + 1 :]:
+                if key in (current.stages if current else {}):
+                    _set_stage(job_id, key, StageStatus.skipped, error="Skipped due to earlier failure")
+    _emit_progress(
+        job_id,
+        failed_stage or "pipeline",
+        "failed",
+        f"Failed: {exc}",
+        percent=None,
+        detail={"error": str(exc)},
+    )
+    _update_job(job_id, status=JobStatus.failed, error=str(exc))
+
+
+def _run_extract_validate(job_id: str, parsed: ParsedDocument, on_progress: ProgressCallback) -> None:
+    out = _job_dir(job_id)
+
+    _update_job(job_id, status=JobStatus.extracting)
+    _set_stage(job_id, STAGE_EXTRACT, StageStatus.running)
+    _emit_progress(
+        job_id,
+        STAGE_EXTRACT,
+        "start",
+        "Starting product extraction…",
+        percent=56,
+    )
+    candidates = extract_products(parsed, on_progress=on_progress)
+    _emit_progress(
+        job_id,
+        STAGE_EXTRACT,
+        "saving_candidates",
+        "Saving candidates.json…",
+        percent=83,
+        detail={"candidate_count": len(candidates)},
+    )
+    _write_json(
+        out / "candidates.json",
+        [c.model_dump(mode="json") for c in candidates],
+    )
+    _set_stage(job_id, STAGE_EXTRACT, StageStatus.completed)
+    _update_job(job_id, candidate_count=len(candidates))
+    _emit_progress(
+        job_id,
+        STAGE_EXTRACT,
+        "extract_complete",
+        f"Extraction complete — {len(candidates)} candidate(s)",
+        percent=85,
+        detail={"candidate_count": len(candidates)},
+    )
+
+    _update_job(job_id, status=JobStatus.validating)
+    _set_stage(job_id, STAGE_VALIDATE, StageStatus.running)
+    _emit_progress(
+        job_id,
+        STAGE_VALIDATE,
+        "start",
+        "Starting validation…",
+        percent=86,
+    )
+    products = validate_products(candidates, on_progress=on_progress)
+    _emit_progress(
+        job_id,
+        STAGE_VALIDATE,
+        "saving_products",
+        "Saving products.json…",
+        percent=97,
+    )
+    _write_json(
+        out / "products.json",
+        [p.model_dump(mode="json") for p in products],
+    )
+    validated = sum(1 for p in products if p.status == ProductStatus.validated)
+    rejected = sum(1 for p in products if p.status == ProductStatus.rejected)
+    _set_stage(job_id, STAGE_VALIDATE, StageStatus.completed)
+    _update_job(
+        job_id,
+        status=JobStatus.completed,
+        products=products,
+        validated_count=validated,
+        rejected_count=rejected,
+    )
+    _emit_progress(
+        job_id,
+        "pipeline",
+        "completed",
+        f"Done — {validated} validated, {rejected} rejected",
+        percent=100,
+        detail={"validated": validated, "rejected": rejected},
+    )
 
 
 def run_pipeline(job_id: str) -> None:
@@ -158,9 +294,9 @@ def run_pipeline(job_id: str) -> None:
     source = Path(job.meta["source_path"])
     out = _job_dir(job_id)
     on_progress = _make_progress_cb(job_id)
+    stage_order = [STAGE_PARSE, STAGE_EXTRACT, STAGE_VALIDATE]
 
     try:
-        # ---- Stage 1 ----
         _update_job(job_id, status=JobStatus.parsing)
         _set_stage(job_id, STAGE_PARSE, StageStatus.running)
         _emit_progress(job_id, STAGE_PARSE, "start", "Starting document parsing…", percent=1)
@@ -189,103 +325,122 @@ def run_pipeline(job_id: str) -> None:
             detail={"page_count": parsed.page_count},
         )
 
-        # ---- Stage 2 ----
-        _update_job(job_id, status=JobStatus.extracting)
-        _set_stage(job_id, STAGE_EXTRACT, StageStatus.running)
+        _run_extract_validate(job_id, parsed, on_progress)
+    except Exception as exc:
+        _fail_pipeline(job_id, exc, stage_order)
+
+    final = get_job(job_id)
+    if final:
+        _write_json(out / "job.json", final.model_dump(mode="json"))
+
+
+def run_url_pipeline(job_id: str) -> None:
+    """Crawl a single URL (hybrid), then parse → extract → validate."""
+    job = get_job(job_id)
+    if job is None:
+        logger.error("Unknown job %s", job_id)
+        return
+
+    out = _job_dir(job_id)
+    on_progress = _make_progress_cb(job_id)
+    stage_order = [STAGE_CRAWL, STAGE_PARSE, STAGE_EXTRACT, STAGE_VALIDATE]
+    source_url = job.meta.get("source_url") or ""
+
+    try:
+        _update_job(job_id, status=JobStatus.parsing)
+        _set_stage(job_id, STAGE_CRAWL, StageStatus.running)
+        _emit_progress(job_id, STAGE_CRAWL, "start", "Starting URL crawl…", percent=1)
+
+        try:
+            fetched = fetch_url(source_url, on_progress=on_progress)
+        except Exception as exc:
+            if isinstance(exc, CrawlError):
+                raise
+            raise CrawlError(str(exc)) from exc
+
+        _write_json(out / "crawl.json", crawl_result_to_artifact(fetched))
+        _set_stage(job_id, STAGE_CRAWL, StageStatus.completed)
         _emit_progress(
             job_id,
-            STAGE_EXTRACT,
-            "start",
-            "Starting product extraction…",
-            percent=56,
-        )
-        candidates = extract_products(parsed, on_progress=on_progress)
-        _emit_progress(
-            job_id,
-            STAGE_EXTRACT,
-            "saving_candidates",
-            "Saving candidates.json…",
-            percent=83,
-            detail={"candidate_count": len(candidates)},
-        )
-        _write_json(
-            out / "candidates.json",
-            [c.model_dump(mode="json") for c in candidates],
-        )
-        _set_stage(job_id, STAGE_EXTRACT, StageStatus.completed)
-        _update_job(job_id, candidate_count=len(candidates))
-        _emit_progress(
-            job_id,
-            STAGE_EXTRACT,
-            "extract_complete",
-            f"Extraction complete — {len(candidates)} candidate(s)",
-            percent=85,
-            detail={"candidate_count": len(candidates)},
+            STAGE_CRAWL,
+            "crawl_complete",
+            f"Crawl complete — {fetched.kind}",
+            percent=15,
+            detail={"kind": fetched.kind},
         )
 
-        # ---- Stage 3 ----
-        _update_job(job_id, status=JobStatus.validating)
-        _set_stage(job_id, STAGE_VALIDATE, StageStatus.running)
+        _set_stage(job_id, STAGE_PARSE, StageStatus.running)
+        _emit_progress(job_id, STAGE_PARSE, "start", "Starting document parsing…", percent=16)
+
+        if isinstance(fetched, BinaryFetch):
+            path = out / fetched.filename
+            path.write_bytes(fetched.data)
+            _update_job(
+                job_id,
+                filename=fetched.filename,
+                meta={
+                    **job.meta,
+                    "source_path": str(path),
+                    "source_url": fetched.source_url,
+                    "final_url": fetched.final_url,
+                    "fetch_kind": "binary",
+                },
+            )
+            parsed = parse_document(
+                path,
+                source_filename=fetched.filename,
+                on_progress=on_progress,
+            )
+        elif isinstance(fetched, HtmlFetch):
+            _update_job(
+                job_id,
+                filename=fetched.title or job.filename,
+                meta={
+                    **job.meta,
+                    "source_url": fetched.source_url,
+                    "final_url": fetched.final_url,
+                    "fetch_kind": "html",
+                    "links_internal": fetched.links_internal,
+                },
+            )
+            _emit_progress(
+                job_id,
+                STAGE_PARSE,
+                "markdown_to_parsed",
+                "Building ParsedDocument from crawl markdown (OCR skipped)…",
+                percent=40,
+            )
+            parsed = parsed_document_from_markdown(
+                fetched.markdown,
+                source_url=fetched.final_url or fetched.source_url,
+                title=fetched.title,
+            )
+        else:
+            raise CrawlError(f"Unknown fetch kind: {type(fetched)}")
+
         _emit_progress(
             job_id,
-            STAGE_VALIDATE,
-            "start",
-            "Starting validation…",
-            percent=86,
+            STAGE_PARSE,
+            "saving_parsed",
+            "Saving parsed.json…",
+            percent=52,
         )
-        products = validate_products(candidates, on_progress=on_progress)
+        _write_json(out / "parsed.json", parsed.model_dump(mode="json"))
+        preview = parsed.text_for_extraction(4000)
+        _set_stage(job_id, STAGE_PARSE, StageStatus.completed)
+        _update_job(job_id, page_count=parsed.page_count, parsed_preview=preview)
         _emit_progress(
             job_id,
-            STAGE_VALIDATE,
-            "saving_products",
-            "Saving products.json…",
-            percent=97,
+            STAGE_PARSE,
+            "parse_complete",
+            f"Parsing complete — {parsed.page_count} page(s)",
+            percent=55,
+            detail={"page_count": parsed.page_count},
         )
-        _write_json(
-            out / "products.json",
-            [p.model_dump(mode="json") for p in products],
-        )
-        validated = sum(1 for p in products if p.status == ProductStatus.validated)
-        rejected = sum(1 for p in products if p.status == ProductStatus.rejected)
-        _set_stage(job_id, STAGE_VALIDATE, StageStatus.completed)
-        _update_job(
-            job_id,
-            status=JobStatus.completed,
-            products=products,
-            validated_count=validated,
-            rejected_count=rejected,
-        )
-        _emit_progress(
-            job_id,
-            "pipeline",
-            "completed",
-            f"Done — {validated} validated, {rejected} rejected",
-            percent=100,
-            detail={"validated": validated, "rejected": rejected},
-        )
+
+        _run_extract_validate(job_id, parsed, on_progress)
     except Exception as exc:
-        logger.exception("Pipeline failed for job %s", job_id)
-        current = get_job(job_id)
-        failed_stage = None
-        if current:
-            for key, stage in current.stages.items():
-                if stage.status == StageStatus.running:
-                    failed_stage = key
-                    break
-        if failed_stage:
-            _set_stage(job_id, failed_stage, StageStatus.failed, error=str(exc))
-            order = [STAGE_PARSE, STAGE_EXTRACT, STAGE_VALIDATE]
-            for key in order[order.index(failed_stage) + 1 :]:
-                _set_stage(job_id, key, StageStatus.skipped, error="Skipped due to earlier failure")
-        _emit_progress(
-            job_id,
-            failed_stage or "pipeline",
-            "failed",
-            f"Failed: {exc}",
-            percent=None,
-            detail={"error": str(exc)},
-        )
-        _update_job(job_id, status=JobStatus.failed, error=str(exc))
+        _fail_pipeline(job_id, exc, stage_order)
 
     final = get_job(job_id)
     if final:
@@ -293,7 +448,7 @@ def run_pipeline(job_id: str) -> None:
 
 
 def artifact_path(job_id: str, name: str) -> Path | None:
-    allowed = {"parsed.json", "candidates.json", "products.json", "job.json"}
+    allowed = {"parsed.json", "candidates.json", "products.json", "job.json", "crawl.json"}
     if name not in allowed:
         return None
     path = _job_dir(job_id) / name

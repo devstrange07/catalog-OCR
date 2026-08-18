@@ -15,7 +15,7 @@
       <p class="brand">Product OCR</p>
       <h1>Catalog &amp; pamphlet extractor</h1>
       <p class="lede">
-        Three stages — parse structure, extract via tool call, then validate.
+        Upload a catalog file or paste a single URL. Parse structure, extract via tool call, then validate.
         OCR never writes the final product record.
       </p>
     </header>
@@ -28,6 +28,16 @@
           <span class="drop-hint">or click to browse · PDF, PNG, JPG</span>
           <span class="file-name" id="fileName"></span>
         </label>
+        <div class="url-row">
+          <label class="url-label" for="urlInput">Catalog URL</label>
+          <input
+            type="url"
+            id="urlInput"
+            name="url"
+            placeholder="https://example.com/catalog.pdf or product page"
+            autocomplete="off"
+          />
+        </div>
         <button type="submit" id="submitBtn" disabled>Run pipeline</button>
       </form>
     </section>
@@ -35,6 +45,14 @@
     <section class="pipeline" id="pipelineSection" hidden>
       <h2>Pipeline</h2>
       <ol class="stages" id="stageList">
+        <li data-stage="crawl" hidden>
+          <span class="stage-num">0</span>
+          <div>
+            <strong>URL Crawl</strong>
+            <p>Download file or crawl4ai HTML markdown</p>
+          </div>
+          <span class="badge" data-badge>pending</span>
+        </li>
         <li data-stage="parse">
           <span class="stage-num">1</span>
           <div>

@@ -6,14 +6,20 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from app import pipeline as pipe
 from app.config import OUTPUTS_DIR
 from app.models.pipeline import JobRecord
+from app.stages.crawl import CrawlError, normalize_url
 
 router = APIRouter(prefix="/api")
 
 ALLOWED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+
+
+class UrlJobRequest(BaseModel):
+    url: str = Field(..., min_length=1, description="Single catalog/page URL to fetch")
 
 
 @router.get("/health")
@@ -45,6 +51,21 @@ async def create_job(
 
     job = pipe.create_job_from_bytes(filename, data)
     background_tasks.add_task(pipe.run_pipeline, job.id)
+    return job
+
+
+@router.post("/jobs/from-url", response_model=JobRecord)
+async def create_job_from_url(
+    body: UrlJobRequest,
+    background_tasks: BackgroundTasks,
+) -> JobRecord:
+    try:
+        url = normalize_url(body.url)
+    except CrawlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    job = pipe.create_job_from_url(url)
+    background_tasks.add_task(pipe.run_url_pipeline, job.id)
     return job
 
 

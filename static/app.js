@@ -1,6 +1,7 @@
 (() => {
   const form = document.getElementById("uploadForm");
   const fileInput = document.getElementById("fileInput");
+  const urlInput = document.getElementById("urlInput");
   const dropzone = document.getElementById("dropzone");
   const fileName = document.getElementById("fileName");
   const submitBtn = document.getElementById("submitBtn");
@@ -21,10 +22,21 @@
   let pollTimer = null;
   let lastLogLen = 0;
 
+  function urlValue() {
+    return (urlInput?.value || "").trim();
+  }
+
+  function updateSubmitEnabled() {
+    submitBtn.disabled = !(selectedFile || urlValue());
+  }
+
   function setFile(file) {
     selectedFile = file || null;
     fileName.textContent = selectedFile ? selectedFile.name : "";
-    submitBtn.disabled = !selectedFile;
+    if (selectedFile && urlInput) {
+      urlInput.value = "";
+    }
+    updateSubmitEnabled();
   }
 
   ["dragenter", "dragover"].forEach((evt) => {
@@ -47,31 +59,57 @@
     }
   });
   fileInput.addEventListener("change", () => setFile(fileInput.files?.[0]));
+  urlInput?.addEventListener("input", () => {
+    if (urlValue() && selectedFile) {
+      selectedFile = null;
+      fileInput.value = "";
+      fileName.textContent = "";
+    }
+    updateSubmitEnabled();
+  });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    if (!selectedFile) return;
+    const url = urlValue();
+    if (!selectedFile && !url) return;
 
     submitBtn.disabled = true;
-    submitBtn.textContent = "Uploading…";
+    submitBtn.textContent = selectedFile ? "Uploading…" : "Fetching URL…";
     errorBox.hidden = true;
     resultsSection.hidden = true;
     pipelineSection.hidden = false;
-    resetStages();
+    resetStages(Boolean(url && !selectedFile));
     resetProgress();
 
-    const body = new FormData();
-    body.append("file", selectedFile);
-
     try {
-      const res = await fetch("/api/jobs", { method: "POST", body });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `Upload failed (${res.status})`);
+      let job;
+      if (selectedFile) {
+        const body = new FormData();
+        body.append("file", selectedFile);
+        const res = await fetch("/api/jobs", { method: "POST", body });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `Upload failed (${res.status})`);
+        }
+        job = await res.json();
+      } else {
+        const res = await fetch("/api/jobs/from-url", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          const detail = err.detail;
+          throw new Error(
+            typeof detail === "string" ? detail : `URL job failed (${res.status})`
+          );
+        }
+        job = await res.json();
       }
-      const job = await res.json();
       jobMeta.textContent = `Job ${job.id} · ${job.filename}`;
       submitBtn.textContent = "Running…";
+      syncCrawlStageVisibility(job.stages);
       renderProgress(job);
       startPolling(job.id);
     } catch (err) {
@@ -82,11 +120,20 @@
     }
   });
 
-  function resetStages() {
+  function syncCrawlStageVisibility(stages) {
+    const crawlLi = document.querySelector('#stageList li[data-stage="crawl"]');
+    if (!crawlLi) return;
+    crawlLi.hidden = !stages?.crawl;
+  }
+
+  function resetStages(showCrawl) {
     document.querySelectorAll("#stageList li").forEach((li) => {
       const badge = li.querySelector("[data-badge]");
       badge.textContent = "pending";
       badge.className = "badge";
+      if (li.dataset.stage === "crawl") {
+        li.hidden = !showCrawl;
+      }
     });
   }
 
@@ -99,6 +146,7 @@
   }
 
   function updateStages(stages) {
+    syncCrawlStageVisibility(stages);
     Object.entries(stages || {}).forEach(([key, info]) => {
       const li = document.querySelector(`#stageList li[data-stage="${key}"]`);
       if (!li) return;
@@ -131,7 +179,6 @@
 
     const log = job.progress_log || [];
     if (log.length !== lastLogLen) {
-      // Newest first
       const items = [...log].reverse();
       progressLog.innerHTML = items
         .map((ev) => {
@@ -213,6 +260,7 @@
     parsedText.textContent = job.parsed_preview || "(no preview)";
 
     const names = ["parsed.json", "candidates.json", "products.json"];
+    if (job.stages?.crawl) names.unshift("crawl.json");
     artifacts.innerHTML = names
       .map(
         (n) =>

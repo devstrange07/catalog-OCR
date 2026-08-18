@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     max_extract_chars: int = 24000
     extract_pages_per_chunk: int = 2
     extract_max_tokens: int = 8192
+    crawl_timeout_sec: int = 60
+    crawl_headless: bool = True
 
 
 settings = Settings()

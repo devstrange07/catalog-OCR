@@ -8,6 +8,8 @@
 
 **Hard rule:** OCR/parsing never emits the final product record. Products come only from the LLM tool call, then validation.
 
+**URL ingest (single URL):** hybrid crawl — PDF/image URLs download into the OCR path; HTML pages use crawl4ai markdown (OCR skipped), then the same extract → validate stages. Deep crawl / URL queues are not enabled yet.
+
 ## Setup
 
 ```bash
@@ -18,10 +20,13 @@ python -m venv .venv
 # source .venv/bin/activate
 
 pip install -r requirements.txt
+crawl4ai-setup
 copy .env.example .env   # or: cp .env.example .env
 ```
 
-Set `DEEPSEEK_API_KEY` in `.env`.
+`crawl4ai-setup` installs Playwright browsers needed for HTML page crawls (one-time).
+
+Set `DEEPSEEK_API_KEY` in `.env`. Optional crawl settings: `CRAWL_TIMEOUT_SEC`, `CRAWL_HEADLESS`.
 
 ## Run
 
@@ -37,13 +42,22 @@ Open [http://localhost:8000](http://localhost:8000).
 |--------|------|-------------|
 | GET | `/api/health` | Health check |
 | POST | `/api/jobs` | Upload PDF/image (`multipart` field `file`) |
+| POST | `/api/jobs/from-url` | JSON `{ "url": "https://..." }` — single URL hybrid fetch |
 | GET | `/api/jobs/{id}` | Job status, stages, products |
-| GET | `/api/jobs/{id}/artifacts/{name}` | `parsed.json` / `candidates.json` / `products.json` |
+| GET | `/api/jobs/{id}/artifacts/{name}` | `crawl.json` (URL jobs) / `parsed.json` / `candidates.json` / `products.json` |
+
+### Hybrid URL behavior
+
+1. Path suffix `.pdf` / image → download bytes → OCR parse  
+2. Else probe `Content-Type`; `application/pdf` or `image/*` → download → OCR  
+3. Otherwise crawl4ai HTML → markdown → `ParsedDocument` (no OCR)  
+4. Internal links are stored on `crawl.json` / job meta for a future deep-crawl pass; they are **not** followed
 
 ## Artifacts
 
 Each job writes under `outputs/{job_id}/`:
 
+- `crawl.json` — URL jobs only (fetch kind, URLs, markdown preview / file meta, internal links)
 - `parsed.json` — Stage 1 structure (no product schema)
 - `candidates.json` — Stage 2 tool-call output
 - `products.json` — Stage 3 validated/rejected records
