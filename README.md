@@ -2,7 +2,7 @@
 
 3-stage extractor for **catalogs and pamphlets**:
 
-1. **Document Parsing** — PaddleOCR (primary text + boxes) + Docling (layout/structure) → `ParsedDocument` only  
+1. **Document Parsing** — selectable channel: PaddleOCR + Docling, or Gemini Vision (`gemini-2.5-flash`) → `ParsedDocument` only  
 2. **Product Extraction** — `deepseek-v4-flash` with an **enforced** `submit_products` tool call → candidates  
 3. **Validation** — Pydantic + business rules → final `ProductRecord`s  
 
@@ -26,7 +26,14 @@ copy .env.example .env   # or: cp .env.example .env
 
 `crawl4ai-setup` installs Playwright browsers needed for HTML page crawls (one-time).
 
-Set `DEEPSEEK_API_KEY` in `.env`. Optional crawl settings: `CRAWL_TIMEOUT_SEC`, `CRAWL_HEADLESS`.
+Set `DEEPSEEK_API_KEY` in `.env`.
+
+Optional Gemini parse channel settings:
+- `GEMINI_API_KEY` — required only when parse channel is `gemini`
+- `GEMINI_MODEL` — defaults to `gemini-2.5-flash`
+- `PARSE_CHANNEL_DEFAULT` — defaults to `paddleocr`
+
+Optional crawl settings: `CRAWL_TIMEOUT_SEC`, `CRAWL_HEADLESS`.
 
 ## Run
 
@@ -41,8 +48,8 @@ Open [http://localhost:8000](http://localhost:8000).
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/health` | Health check |
-| POST | `/api/jobs` | Upload PDF/image (`multipart` field `file`) |
-| POST | `/api/jobs/from-url` | JSON `{ "url": "https://..." }` — single URL hybrid fetch |
+| POST | `/api/jobs` | Upload PDF/image (`multipart` field `file`, optional `parse_channel`: `paddleocr`/`gemini`) |
+| POST | `/api/jobs/from-url` | JSON `{ "url": "https://..." }`, optional `parse_channel` |
 | GET | `/api/jobs/{id}` | Job status, stages, products |
 | GET | `/api/jobs/{id}/artifacts/{name}` | `crawl.json` (URL jobs) / `parsed.json` / `candidates.json` / `products.json` |
 
@@ -68,8 +75,9 @@ Drop your own catalog PDFs or images into `samples/`. Nothing is bundled (copyri
 
 ## Notes
 
-- First OCR run may download PaddleOCR models.
+- First PaddleOCR run may download PaddleOCR models.
 - On Windows CPU, PaddleOCR is initialized with `enable_mkldnn=False` to avoid a known oneDNN/PIR crash.
 - Docling is used for PDF layout/markdown; its own OCR is disabled because PaddleOCR is primary. Image-only Docling failures are non-fatal — extraction still uses PaddleOCR text.
+- Gemini channel uses a vision model to produce Stage-1 text blocks; if `GEMINI_API_KEY` is missing and channel is `gemini`, Stage-1 fails clearly.
 - Missing `DEEPSEEK_API_KEY` fails Stage 2 clearly — it will not invent products from OCR.
 - Unit tests: `python -m pytest tests -q`

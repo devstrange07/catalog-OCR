@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
+    parse_channel_default: str = "paddleocr"
     ocr_lang: str = "en"
     host: str = "0.0.0.0"
     port: int = 8000

@@ -15,8 +15,8 @@
       <p class="brand">Product OCR</p>
       <h1>Catalog &amp; pamphlet extractor</h1>
       <p class="lede">
-        Upload a catalog file or paste a single URL. Parse structure, extract via tool call, then validate.
-        OCR never writes the final product record.
+        Upload a catalog file or paste a single URL. Choose PaddleOCR or Gemini Vision,
+        then extract via tool call and validate. OCR never writes the final product record.
       </p>
     </header>
 
@@ -38,6 +38,17 @@
             autocomplete="off"
           />
         </div>
+        <fieldset class="channel-row">
+          <legend>Parse channel</legend>
+          <label>
+            <input type="radio" name="parseChannel" value="paddleocr" checked />
+            PaddleOCR
+          </label>
+          <label>
+            <input type="radio" name="parseChannel" value="gemini" />
+            Gemini Vision
+          </label>
+        </fieldset>
         <button type="submit" id="submitBtn" disabled>Run pipeline</button>
       </form>
     </section>
@@ -57,7 +68,7 @@
           <span class="stage-num">1</span>
           <div>
             <strong>Document Parsing</strong>
-            <p>PaddleOCR + Docling → structure only</p>
+            <p id="parseStageHint">PaddleOCR + Docling → structure only</p>
           </div>
           <span class="badge" data-badge>pending</span>
         </li>

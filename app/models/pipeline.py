@@ -21,6 +21,11 @@ class JobStatus(str, Enum):
     failed = "failed"
 
 
+class ParseChannel(str, Enum):
+    paddleocr = "paddleocr"
+    gemini = "gemini"
+
+
 class StageStatus(str, Enum):
     pending = "pending"
     running = "running"

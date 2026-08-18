@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from app.config import OUTPUTS_DIR
+from app.config import OUTPUTS_DIR, settings
 from app.models.document import ParsedDocument
-from app.models.pipeline import JobRecord, JobStatus, ProgressEvent, StageInfo, StageStatus
+from app.models.pipeline import JobRecord, JobStatus, ParseChannel, ProgressEvent, StageInfo, StageStatus
 from app.models.product import ProductStatus
 from app.stages.crawl import (
     BinaryFetch,
@@ -25,6 +25,7 @@ from app.stages.crawl import (
 )
 from app.stages.extract import extract_products
 from app.stages.parse import parse_document
+from app.stages.parse_gemini import parse_document_gemini
 from app.stages.validate import validate_products
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,17 @@ STAGE_VALIDATE = "validate"
 PROGRESS_LOG_CAP = 80
 
 ProgressCallback = Callable[..., None]
+
+
+def _resolve_parse_channel(value: str | ParseChannel | None) -> ParseChannel:
+    raw = value.value if isinstance(value, ParseChannel) else value
+    if raw is None:
+        raw = settings.parse_channel_default
+    normalized = str(raw).strip().lower()
+    try:
+        return ParseChannel(normalized)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported parse channel '{raw}'. Use paddleocr or gemini.") from exc
 
 
 def _now() -> datetime:
@@ -142,17 +154,26 @@ def _make_progress_cb(job_id: str) -> ProgressCallback:
     return on_progress
 
 
-def create_job_from_bytes(filename: str, data: bytes) -> JobRecord:
+def create_job_from_bytes(
+    filename: str,
+    data: bytes,
+    parse_channel: str | ParseChannel | None = None,
+) -> JobRecord:
     job_id = uuid.uuid4().hex[:12]
     dest_dir = _job_dir(job_id)
     path = dest_dir / filename
     path.write_bytes(data)
+    channel = _resolve_parse_channel(parse_channel)
     job = JobRecord(
         id=job_id,
         filename=filename,
         status=JobStatus.queued,
         stages=_default_stages(),
-        meta={"source_path": str(path), "source_kind": "upload"},
+        meta={
+            "source_path": str(path),
+            "source_kind": "upload",
+            "parse_channel": channel.value,
+        },
     )
     with _lock:
         _jobs[job_id] = job
@@ -161,18 +182,23 @@ def create_job_from_bytes(filename: str, data: bytes) -> JobRecord:
     return get_job(job_id)  # type: ignore[return-value]
 
 
-def create_job_from_url(url: str) -> JobRecord:
+def create_job_from_url(url: str, parse_channel: str | ParseChannel | None = None) -> JobRecord:
     cleaned = normalize_url(url)
     job_id = uuid.uuid4().hex[:12]
     dest_dir = _job_dir(job_id)
     host = cleaned.split("://", 1)[-1].split("/", 1)[0]
     filename = f"url:{host}"
+    channel = _resolve_parse_channel(parse_channel)
     job = JobRecord(
         id=job_id,
         filename=filename,
         status=JobStatus.queued,
         stages=_default_stages(include_crawl=True),
-        meta={"source_url": cleaned, "source_kind": "url"},
+        meta={
+            "source_url": cleaned,
+            "source_kind": "url",
+            "parse_channel": channel.value,
+        },
     )
     with _lock:
         _jobs[job_id] = job
@@ -284,6 +310,17 @@ def _run_extract_validate(job_id: str, parsed: ParsedDocument, on_progress: Prog
     )
 
 
+def _parse_document_for_channel(
+    source: Path,
+    filename: str,
+    parse_channel: ParseChannel,
+    on_progress: ProgressCallback,
+) -> ParsedDocument:
+    if parse_channel == ParseChannel.gemini:
+        return parse_document_gemini(source, source_filename=filename, on_progress=on_progress)
+    return parse_document(source, source_filename=filename, on_progress=on_progress)
+
+
 def run_pipeline(job_id: str) -> None:
     """Execute Stage1 → Stage2 → Stage3. Safe to run in a background thread."""
     job = get_job(job_id)
@@ -292,6 +329,7 @@ def run_pipeline(job_id: str) -> None:
         return
 
     source = Path(job.meta["source_path"])
+    parse_channel = _resolve_parse_channel(job.meta.get("parse_channel"))
     out = _job_dir(job_id)
     on_progress = _make_progress_cb(job_id)
     stage_order = [STAGE_PARSE, STAGE_EXTRACT, STAGE_VALIDATE]
@@ -299,10 +337,17 @@ def run_pipeline(job_id: str) -> None:
     try:
         _update_job(job_id, status=JobStatus.parsing)
         _set_stage(job_id, STAGE_PARSE, StageStatus.running)
-        _emit_progress(job_id, STAGE_PARSE, "start", "Starting document parsing…", percent=1)
-        parsed = parse_document(
-            source,
-            source_filename=job.filename,
+        _emit_progress(
+            job_id,
+            STAGE_PARSE,
+            "start",
+            f"Starting document parsing via {parse_channel.value}…",
+            percent=1,
+        )
+        parsed = _parse_document_for_channel(
+            source=source,
+            filename=job.filename,
+            parse_channel=parse_channel,
             on_progress=on_progress,
         )
         _emit_progress(
@@ -320,7 +365,7 @@ def run_pipeline(job_id: str) -> None:
             job_id,
             STAGE_PARSE,
             "parse_complete",
-            f"Parsing complete — {parsed.page_count} page(s)",
+            f"Parsing complete via {parse_channel.value} — {parsed.page_count} page(s)",
             percent=55,
             detail={"page_count": parsed.page_count},
         )
@@ -342,6 +387,7 @@ def run_url_pipeline(job_id: str) -> None:
         return
 
     out = _job_dir(job_id)
+    parse_channel = _resolve_parse_channel(job.meta.get("parse_channel"))
     on_progress = _make_progress_cb(job_id)
     stage_order = [STAGE_CRAWL, STAGE_PARSE, STAGE_EXTRACT, STAGE_VALIDATE]
     source_url = job.meta.get("source_url") or ""
@@ -370,7 +416,13 @@ def run_url_pipeline(job_id: str) -> None:
         )
 
         _set_stage(job_id, STAGE_PARSE, StageStatus.running)
-        _emit_progress(job_id, STAGE_PARSE, "start", "Starting document parsing…", percent=16)
+        _emit_progress(
+            job_id,
+            STAGE_PARSE,
+            "start",
+            f"Starting document parsing via {parse_channel.value}…",
+            percent=16,
+        )
 
         if isinstance(fetched, BinaryFetch):
             path = out / fetched.filename
@@ -386,9 +438,10 @@ def run_url_pipeline(job_id: str) -> None:
                     "fetch_kind": "binary",
                 },
             )
-            parsed = parse_document(
-                path,
-                source_filename=fetched.filename,
+            parsed = _parse_document_for_channel(
+                source=path,
+                filename=fetched.filename,
+                parse_channel=parse_channel,
                 on_progress=on_progress,
             )
         elif isinstance(fetched, HtmlFetch):
@@ -433,7 +486,7 @@ def run_url_pipeline(job_id: str) -> None:
             job_id,
             STAGE_PARSE,
             "parse_complete",
-            f"Parsing complete — {parsed.page_count} page(s)",
+            f"Parsing complete via {parse_channel.value} — {parsed.page_count} page(s)",
             percent=55,
             detail={"page_count": parsed.page_count},
         )

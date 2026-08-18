@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app import pipeline as pipe
 from app.config import OUTPUTS_DIR
-from app.models.pipeline import JobRecord
+from app.models.pipeline import JobRecord, ParseChannel
 from app.stages.crawl import CrawlError, normalize_url
 
 router = APIRouter(prefix="/api")
@@ -20,6 +20,10 @@ ALLOWED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".
 
 class UrlJobRequest(BaseModel):
     url: str = Field(..., min_length=1, description="Single catalog/page URL to fetch")
+    parse_channel: ParseChannel | None = Field(
+        default=None,
+        description="Stage-1 parser channel: paddleocr or gemini",
+    )
 
 
 @router.get("/health")
@@ -36,6 +40,7 @@ def list_jobs() -> list[JobRecord]:
 async def create_job(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    parse_channel: ParseChannel | None = Form(default=None),
 ) -> JobRecord:
     filename = Path(file.filename or "upload.bin").name
     suffix = Path(filename).suffix.lower()
@@ -49,7 +54,7 @@ async def create_job(
     if not data:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    job = pipe.create_job_from_bytes(filename, data)
+    job = pipe.create_job_from_bytes(filename, data, parse_channel=parse_channel)
     background_tasks.add_task(pipe.run_pipeline, job.id)
     return job
 
@@ -64,7 +69,7 @@ async def create_job_from_url(
     except CrawlError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    job = pipe.create_job_from_url(url)
+    job = pipe.create_job_from_url(url, parse_channel=body.parse_channel)
     background_tasks.add_task(pipe.run_url_pipeline, job.id)
     return job
 

@@ -17,6 +17,7 @@
   const progressPct = document.getElementById("progressPct");
   const progressCurrent = document.getElementById("progressCurrent");
   const progressLog = document.getElementById("progressLog");
+  const parseStageHint = document.getElementById("parseStageHint");
 
   let selectedFile = null;
   let pollTimer = null;
@@ -24,6 +25,23 @@
 
   function urlValue() {
     return (urlInput?.value || "").trim();
+  }
+
+  function selectedParseChannel() {
+    const checked = form.querySelector('input[name="parseChannel"]:checked');
+    return checked?.value === "gemini" ? "gemini" : "paddleocr";
+  }
+
+  function channelLabel(channel) {
+    return channel === "gemini" ? "Gemini Vision" : "PaddleOCR";
+  }
+
+  function setParseStageHint(channel) {
+    if (!parseStageHint) return;
+    parseStageHint.textContent =
+      channel === "gemini"
+        ? "Gemini Vision → structure only"
+        : "PaddleOCR + Docling → structure only";
   }
 
   function updateSubmitEnabled() {
@@ -80,12 +98,15 @@
     pipelineSection.hidden = false;
     resetStages(Boolean(url && !selectedFile));
     resetProgress();
+    const parseChannel = selectedParseChannel();
+    setParseStageHint(parseChannel);
 
     try {
       let job;
       if (selectedFile) {
         const body = new FormData();
         body.append("file", selectedFile);
+        body.append("parse_channel", parseChannel);
         const res = await fetch("/api/jobs", { method: "POST", body });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
@@ -96,7 +117,7 @@
         const res = await fetch("/api/jobs/from-url", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url }),
+          body: JSON.stringify({ url, parse_channel: parseChannel }),
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
@@ -107,7 +128,7 @@
         }
         job = await res.json();
       }
-      jobMeta.textContent = `Job ${job.id} · ${job.filename}`;
+      jobMeta.textContent = `Job ${job.id} · ${job.filename} · ${channelLabel(job.meta?.parse_channel || parseChannel)}`;
       submitBtn.textContent = "Running…";
       syncCrawlStageVisibility(job.stages);
       renderProgress(job);
@@ -202,7 +223,9 @@
         const job = await res.json();
         updateStages(job.stages);
         renderProgress(job);
-        jobMeta.textContent = `Job ${job.id} · ${job.filename} · ${job.status}`;
+        const channel = channelLabel(job.meta?.parse_channel);
+        jobMeta.textContent = `Job ${job.id} · ${job.filename} · ${job.status} · ${channel}`;
+        setParseStageHint(job.meta?.parse_channel);
 
         if (job.error) {
           errorBox.hidden = false;

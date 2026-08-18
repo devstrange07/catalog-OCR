@@ -19,7 +19,7 @@ logging.basicConfig(
 app = FastAPI(
     title="Catalog Product Extraction POC",
     description=(
-        "3-stage pipeline: Document Parsing (PaddleOCR + Docling) → "
+        "3-stage pipeline: Document Parsing (PaddleOCR+Docling or Gemini Vision) → "
         "Product Extraction (deepseek-v4-flash tool call) → Validation. "
         "OCR never emits final product records."
     ),
