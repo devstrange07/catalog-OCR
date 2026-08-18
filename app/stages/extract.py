@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from typing import Any
 
 from openai import OpenAI
@@ -68,6 +69,22 @@ SUBMIT_PRODUCTS_TOOL: dict[str, Any] = {
                                 "minimum": 0,
                                 "maximum": 1,
                             },
+                            "price_variants": {
+                                "type": ["array", "null"],
+                                "description": "Multiple price columns (e.g. Gravy/Hakka)",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": {"type": ["string", "null"]},
+                                        "price": {"type": ["number", "string", "null"]},
+                                        "details": {
+                                            "type": ["string", "null"],
+                                            "description": "Short description/inclusions specific to this variant",
+                                        },
+                                    },
+                                    "additionalProperties": False,
+                                },
+                            },
                         },
                         "required": ["name"],
                         "additionalProperties": False,
@@ -88,6 +105,11 @@ Rules:
 - For multi-product pages, return every distinct product you can support with evidence.
 - Set source_snippet to a short quote from the text (max ~120 characters); keep description brief.
 - Set page when known from headers like "--- Page N ---".
+- If a row has multiple price columns (e.g. Gravy/Hakka, Half/Full), populate
+  price_variants in left-to-right order using the column headers as labels.
+  Keep price as the first listed variant value for backward compatibility.
+- If a variant has its own description/inclusions text, capture it in
+  price_variants.details and keep it brief (<=120 chars).
 - If no products are present, call submit_products with an empty products array.
 - You MUST call the submit_products tool. Do not answer with free-form JSON or prose as the product list.
 """
@@ -114,7 +136,23 @@ def _format_pages_text(pages: list[ParsedPage], max_chars: int) -> str:
     parts: list[str] = []
     for page in pages:
         parts.append(f"--- Page {page.page_number} ---")
-        for block in sorted(page.blocks, key=lambda b: b.reading_order):
+        ordered_blocks = sorted(page.blocks, key=lambda b: b.reading_order)
+        grouped: dict[int, list] = defaultdict(list)
+        no_row_blocks = []
+        for block in ordered_blocks:
+            if block.row_id is None:
+                no_row_blocks.append(block)
+            else:
+                grouped[block.row_id].append(block)
+
+        for row_id in sorted(grouped):
+            row_blocks = sorted(grouped[row_id], key=lambda b: b.reading_order)
+            if row_blocks:
+                lead = f"[{row_blocks[0].block_id}] "
+                row_text = " | ".join(b.text for b in row_blocks)
+                parts.append(lead + row_text)
+
+        for block in no_row_blocks:
             parts.append(f"[{block.block_id}] {block.text}")
         if not page.blocks and page.full_text:
             parts.append(page.full_text)

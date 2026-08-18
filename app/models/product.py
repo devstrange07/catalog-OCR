@@ -13,6 +13,12 @@ class ProductStatus(str, Enum):
     rejected = "rejected"
 
 
+class PriceVariant(BaseModel):
+    label: str | None = None
+    price: float | str | None = None
+    details: str | None = None
+
+
 class CandidateProduct(BaseModel):
     """LLM-proposed product via tool call. Not a final record."""
 
@@ -28,6 +34,7 @@ class CandidateProduct(BaseModel):
     page: int | None = None
     source_snippet: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    price_variants: list[PriceVariant] | None = None
 
 
 class ProductRecord(BaseModel):
@@ -45,6 +52,7 @@ class ProductRecord(BaseModel):
     page: int | None = None
     source_snippet: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    price_variants: list[PriceVariant] | None = None
     status: ProductStatus
     validation_errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

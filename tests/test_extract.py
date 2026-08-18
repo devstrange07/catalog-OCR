@@ -11,6 +11,7 @@ from app.config import settings
 from app.models.document import ParsedDocument, ParsedPage, TextBlock
 from app.models.product import CandidateProduct
 from app.stages.extract import (
+    _format_pages_text,
     _chunk_pages,
     _dedupe_candidates,
     _extract_chunk,
@@ -139,3 +140,18 @@ def test_extract_requires_api_key(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
         extract_products(doc)
+
+
+def test_format_pages_text_groups_same_row_blocks():
+    page = ParsedPage(
+        page_number=1,
+        blocks=[
+            TextBlock(block_id="p1-b0", text="Veg noodles", reading_order=2, row_id=0),
+            TextBlock(block_id="p1-b1", text="139/-", reading_order=0, row_id=0),
+            TextBlock(block_id="p1-b2", text="109/-", reading_order=1, row_id=0),
+            TextBlock(block_id="p1-b3", text="Footer note", reading_order=3, row_id=None),
+        ],
+    )
+    text = _format_pages_text([page], 5000)
+    assert "[p1-b1] 139/- | 109/- | Veg noodles" in text
+    assert "[p1-b3] Footer note" in text

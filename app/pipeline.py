@@ -278,7 +278,7 @@ def _run_extract_validate(job_id: str, parsed: ParsedDocument, on_progress: Prog
         "Starting validation…",
         percent=86,
     )
-    products = validate_products(candidates, on_progress=on_progress)
+    products = validate_products(candidates, parsed=parsed, on_progress=on_progress)
     _emit_progress(
         job_id,
         STAGE_VALIDATE,

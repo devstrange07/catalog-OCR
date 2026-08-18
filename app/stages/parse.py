@@ -20,6 +20,7 @@ from PIL import Image
 
 from app.config import settings
 from app.models.document import BBox, ParsedDocument, ParsedPage, TextBlock
+from app.stages.spatial import group_into_rows
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +142,6 @@ def _ocr_page(image: Image.Image, page_number: int) -> ParsedPage:
     raw_lines = _lines_from_predict(page_result) if page_result is not None else []
 
     blocks: list[TextBlock] = []
-    lines: list[str] = []
     for idx, (poly, text, conf) in enumerate(raw_lines):
         block_id = f"p{page_number}-b{idx}"
         has_poly = poly is not None and len(poly) > 0
@@ -154,7 +154,8 @@ def _ocr_page(image: Image.Image, page_number: int) -> ParsedPage:
                 reading_order=idx,
             )
         )
-        lines.append(text)
+    blocks = group_into_rows(blocks)
+    lines = [block.text for block in sorted(blocks, key=lambda b: b.reading_order)]
 
     return ParsedPage(
         page_number=page_number,

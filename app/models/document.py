@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -22,6 +23,7 @@ class TextBlock(BaseModel):
     bbox: BBox | None = None
     confidence: float | None = None
     reading_order: int = 0
+    row_id: int | None = None
 
 
 class ParsedPage(BaseModel):
@@ -50,7 +52,23 @@ class ParsedDocument(BaseModel):
         parts: list[str] = []
         for page in self.pages:
             parts.append(f"--- Page {page.page_number} ---")
-            for block in sorted(page.blocks, key=lambda b: b.reading_order):
+            ordered_blocks = sorted(page.blocks, key=lambda b: b.reading_order)
+            grouped: dict[int, list[TextBlock]] = defaultdict(list)
+            no_row_blocks: list[TextBlock] = []
+            for block in ordered_blocks:
+                if block.row_id is None:
+                    no_row_blocks.append(block)
+                else:
+                    grouped[block.row_id].append(block)
+
+            for row_id in sorted(grouped):
+                row_blocks = sorted(grouped[row_id], key=lambda b: b.reading_order)
+                if row_blocks:
+                    lead = f"[{row_blocks[0].block_id}] "
+                    row_text = " | ".join(b.text for b in row_blocks)
+                    parts.append(lead + row_text)
+
+            for block in no_row_blocks:
                 parts.append(f"[{block.block_id}] {block.text}")
             if not page.blocks and page.full_text:
                 parts.append(page.full_text)
