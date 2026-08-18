@@ -19,6 +19,7 @@ from PIL import Image
 
 from app.config import settings
 from app.models.document import BBox, ParsedDocument, ParsedPage, TextBlock
+from app.stages.spatial import group_into_rows
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +148,6 @@ def _gemini_extract_blocks(image: Image.Image, page_number: int) -> ParsedPage:
         raw_blocks = []
 
     blocks: list[TextBlock] = []
-    lines: list[str] = []
     for idx, item in enumerate(raw_blocks):
         if not isinstance(item, dict):
             continue
@@ -162,7 +162,8 @@ def _gemini_extract_blocks(image: Image.Image, page_number: int) -> ParsedPage:
             reading_order=idx,
         )
         blocks.append(block)
-        lines.append(text)
+    blocks = group_into_rows(blocks)
+    lines = [block.text for block in sorted(blocks, key=lambda b: b.reading_order)]
 
     return ParsedPage(
         page_number=page_number,

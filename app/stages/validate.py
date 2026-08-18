@@ -9,10 +9,12 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
+from app.models.document import ParsedDocument, TextBlock
 from app.models.product import CandidateProduct, ProductRecord, ProductStatus
 
 _CURRENCY_RE = re.compile(r"^[A-Za-z]{3}$")
 _PRICE_CLEAN_RE = re.compile(r"[^\d.\-]")
+_PRICE_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?")
 
 
 def _normalize_price(value: float | str | None) -> tuple[float | None, list[str]]:
@@ -44,7 +46,73 @@ def _normalize_currency(value: str | None) -> tuple[str | None, list[str]]:
     return code, warnings
 
 
-def _validate_one(candidate: CandidateProduct) -> ProductRecord:
+def _normalize_price_variants(candidate: CandidateProduct) -> tuple[list[dict] | None, list[str]]:
+    errors: list[str] = []
+    if not candidate.price_variants:
+        return None, errors
+
+    normalized: list[dict] = []
+    for variant in candidate.price_variants:
+        price, price_errors = _normalize_price(variant.price)
+        errors.extend(price_errors)
+        details = (variant.details or "").strip() or None
+        normalized.append({"label": variant.label, "price": price, "details": details})
+    return normalized, errors
+
+
+def _best_name_block(blocks: list[TextBlock], name: str) -> TextBlock | None:
+    needle = name.strip().lower()
+    if not needle:
+        return None
+    exact = [b for b in blocks if needle in b.text.lower()]
+    if exact:
+        return max(exact, key=lambda b: len(needle))
+    return None
+
+
+def _best_price_block(blocks: list[TextBlock], price_value: float | str | None) -> TextBlock | None:
+    if price_value is None:
+        return None
+    price_text = str(price_value)
+    clean = _PRICE_CLEAN_RE.sub("", price_text.replace(",", ""))
+    if not clean:
+        return None
+    token_match = _PRICE_TOKEN_RE.search(clean)
+    if not token_match:
+        return None
+    token = token_match.group(0)
+    hits = [b for b in blocks if token in b.text]
+    if hits:
+        return hits[0]
+    return None
+
+
+def _flag_spatial_mismatch(
+    candidate: CandidateProduct,
+    warnings: list[str],
+    page_blocks: dict[int, list[TextBlock]],
+) -> None:
+    if candidate.page is None or not candidate.source_snippet:
+        return
+    blocks = page_blocks.get(candidate.page, [])
+    if not blocks:
+        return
+    name_block = _best_name_block(blocks, candidate.name)
+    price_block = _best_price_block(blocks, candidate.price)
+    if not name_block or not price_block:
+        return
+    if name_block.row_id is None or price_block.row_id is None:
+        return
+    if name_block.row_id != price_block.row_id:
+        warnings.append(
+            "Spatial check: name and price token are not on the same OCR row (possible row-shift)"
+        )
+
+
+def _validate_one(
+    candidate: CandidateProduct,
+    page_blocks: dict[int, list[TextBlock]] | None = None,
+) -> ProductRecord:
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -54,6 +122,8 @@ def _validate_one(candidate: CandidateProduct) -> ProductRecord:
 
     price, price_errors = _normalize_price(candidate.price)
     errors.extend(price_errors)
+    price_variants, variant_errors = _normalize_price_variants(candidate)
+    errors.extend(variant_errors)
 
     currency, currency_warnings = _normalize_currency(candidate.currency)
     warnings.extend(currency_warnings)
@@ -62,6 +132,9 @@ def _validate_one(candidate: CandidateProduct) -> ProductRecord:
     if confidence is not None and not (0.0 <= confidence <= 1.0):
         warnings.append(f"Confidence out of range, clamped: {confidence}")
         confidence = max(0.0, min(1.0, float(confidence)))
+
+    if page_blocks:
+        _flag_spatial_mismatch(candidate, warnings, page_blocks)
 
     # Empty shell: no name and nothing else useful
     if not name and not any(
@@ -90,6 +163,7 @@ def _validate_one(candidate: CandidateProduct) -> ProductRecord:
         page=candidate.page,
         source_snippet=(candidate.source_snippet or None),
         confidence=confidence,
+        price_variants=price_variants,
         status=status,
         validation_errors=errors,
         warnings=warnings,
@@ -107,7 +181,11 @@ def _flag_duplicates(records: list[ProductRecord]) -> None:
                 records[i].warnings.append("Possible duplicate product in document")
 
 
-def validate_products(candidates: list[CandidateProduct], on_progress=None) -> list[ProductRecord]:
+def validate_products(
+    candidates: list[CandidateProduct],
+    parsed: ParsedDocument | None = None,
+    on_progress=None,
+) -> list[ProductRecord]:
     """Stage 3 entrypoint."""
 
     def _notify(step: str, message: str, percent: int | None = None, detail=None) -> None:
@@ -121,7 +199,11 @@ def validate_products(candidates: list[CandidateProduct], on_progress=None) -> l
         percent=88,
         detail={"candidate_count": total},
     )
-    records = [_validate_one(c) for c in candidates]
+    page_blocks: dict[int, list[TextBlock]] = {}
+    if parsed is not None:
+        for page in parsed.pages:
+            page_blocks[page.page_number] = list(page.blocks)
+    records = [_validate_one(c, page_blocks=page_blocks) for c in candidates]
     _flag_duplicates(records)
     validated = sum(1 for r in records if r.status == ProductStatus.validated)
     rejected = sum(1 for r in records if r.status == ProductStatus.rejected)
