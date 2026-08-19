@@ -100,7 +100,7 @@ Each job writes under `outputs/{job_id}/`:
 - `crawl.json` — URL jobs only (fetch kind, URLs, markdown preview / file meta, internal links)
 - `parsed.json` — Stage 1 structure (no product schema)
 - `candidates.json` — Stage 2 tool-call output
-- `products.json` — Stage 3 validated/rejected records, each optionally carrying `price_variants` (see Notes)
+- `products.json` — Stage 3 records with `status` (`validated`/`needs_review`/`invalid`), each optionally carrying `price_variants` (see Notes)
 
 ## Samples
 
@@ -125,13 +125,54 @@ Drop your own catalog PDFs or images into `samples/`. Nothing is bundled (copyri
   variant for backward compatibility.
   - Non-numeric variant prices (free, included, complimentary, n/a, tbd, on request, `-`) are recorded
     in `available`, not treated as errors.
-  - A variant with an unparseable price never rejects the whole product — it adds a warning
+  - A variant with an unparseable price never invalidates the whole product — it adds a warning
     (on both the variant and the product) instead of a `validation_errors` entry. A product is only
-    `rejected` when `name` is empty and no other identity/value field (brand, sku, product_code, price,
+    `invalid` when `name` is empty and no other identity/value field (brand, sku, product_code, price,
     description, price_variants) is present.
-  - Stage 2 candidates are grouped by `(name, page, sku)` before validation; duplicate-keyed candidates
+- Stage 2 candidates are grouped by `(name, page, sku)` before validation; duplicate-keyed candidates
     (e.g. a variant table split across a chunk boundary) have their `price_variants` merged rather than
     the later occurrence being dropped.
+
+### Layout-aware spatial association and validation status
+
+Multi-column flyers/catalogs previously let the raw OCR reading order interleave columns
+(`name | price | promo`), so a name from one card could be paired with a price or promo code from an
+adjacent card while still being marked `validated`. Stage 1 now segments each page into columns and
+card-like **regions** (`app/stages/layout.py`) before Stage 2 ever sees the text; Stage 3 then only
+associates a product's price/variant fields with OCR tokens found inside that same region.
+
+- `ParsedPage.regions` — candidate visual cards/headings detected on the page (`region_id`, `column_id`,
+  `bbox`, `block_ids`, `kind`). `TextBlock.region_id`/`column_id`/`line_id` tag which region/column/line
+  each OCR block belongs to. Pages with no bbox data (e.g. the HTML/markdown crawl path) get no regions —
+  spatial checks are skipped for those documents rather than producing false positives.
+- The Stage 2 prompt text groups blocks under `[region <id>]` headers instead of joining a page-wide row
+  with `" | "`; the model is instructed to keep every field of one product within a single region and may
+  report `region_id`/`source_block_ids` per product.
+- `ProductRecord` now separates:
+  - `schema_valid` — the record's shape/types are valid (name present, prices parseable, not an empty shell).
+  - `extraction_valid` — every field could be attributed to the product's own region (no unresolved spatial/semantic issue).
+  - `status` — one of `validated`, `needs_review`, `invalid`. A record is `validated` only when both
+    `schema_valid` and `extraction_valid` are true; `needs_review` means schema-valid but an association is
+    unresolved; `invalid` means a schema/business rule failed.
+  - `region_id` / `provenance` — the resolved anchor region and, per field, the source bbox/region/block ids
+    used to resolve it, for audit.
+  - `validation_errors` is now a list of structured `ValidationIssue` objects
+    (`code`, `field`, `message`, `product_bbox`, `field_bbox`, `region_id`, `confidence`, `severity`), not
+    plain strings. Free-text `warnings` (currency formatting, duplicate names, unparseable variant price)
+    are unaffected and never change `status`.
+- If a candidate's price (or a variant's price) matches an OCR token that lives in a *different* region than
+  the product's own, Stage 3 does not guess — it nulls that field, records a `SPATIAL_ASSOCIATION_AMBIGUOUS`
+  issue with both bboxes as evidence, and the record becomes `needs_review`.
+- Cross-record semantic checks (`app/stages/semantics.py`) flag additional contamination patterns with no
+  hard-coded product names/prices: `MRP_NOT_ABOVE_PRICE`, `SHARED_SOURCE_BBOX`, `NAME_INCLUDES_SEPARATE_FIELD`,
+  `PROMO_CODE_OUT_OF_REGION`, `QUANTITY_OUT_OF_REGION`, `ATTRIBUTE_OUT_OF_REGION`.
+- Equivalent issues at the product- and variant-price level are deduplicated (`app.models.product.dedupe_issues`)
+  so the same contamination isn't reported twice.
+
+Known limitation: Stage 2 is still an LLM call, so region-scoped prompting reduces but cannot prove the
+absence of contamination on its own — the Stage 3 region-scoped resolver and semantic checks above are the
+deterministic backstop and are what the automated tests assert against.
+
 - Unit tests: `python -m pytest tests -q`
 
 ## Benchmark checklist (CPU vs CUDA)

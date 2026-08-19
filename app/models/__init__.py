@@ -1,4 +1,4 @@
-from app.models.document import BBox, ParsedDocument, ParsedPage, TextBlock
+from app.models.document import BBox, LayoutRegion, ParsedDocument, ParsedPage, TextBlock
 from app.models.pipeline import (
     JobRecord,
     JobStatus,
@@ -9,13 +9,18 @@ from app.models.pipeline import (
 )
 from app.models.product import (
     CandidateProduct,
+    FieldProvenance,
+    IssueSeverity,
+    PriceVariant,
     ProductRecord,
     ProductStatus,
     SubmitProductsArgs,
+    ValidationIssue,
 )
 
 __all__ = [
     "BBox",
+    "LayoutRegion",
     "ParsedDocument",
     "ParsedPage",
     "TextBlock",
@@ -26,7 +31,11 @@ __all__ = [
     "StageInfo",
     "StageStatus",
     "CandidateProduct",
+    "FieldProvenance",
+    "IssueSeverity",
+    "PriceVariant",
     "ProductRecord",
     "ProductStatus",
     "SubmitProductsArgs",
+    "ValidationIssue",
 ]

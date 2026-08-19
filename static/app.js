@@ -256,19 +256,25 @@
   function renderResults(job) {
     resultsSection.hidden = false;
     const validated = job.validated_count ?? 0;
-    const rejected = job.rejected_count ?? 0;
-    counts.textContent = `${validated} validated · ${rejected} rejected · ${job.candidate_count ?? 0} candidates`;
+    const needsReview = job.needs_review_count ?? 0;
+    const invalid = job.invalid_count ?? 0;
+    counts.textContent =
+      `${validated} validated · ${needsReview} needs review · ${invalid} invalid · ` +
+      `${job.candidate_count ?? 0} candidates`;
 
     productBody.innerHTML = "";
     (job.products || []).forEach((p) => {
       const tr = document.createElement("tr");
-      const notes = [...(p.validation_errors || []), ...(p.warnings || [])].join("; ");
+      const issueMessages = (p.validation_errors || []).map((e) =>
+        typeof e === "string" ? e : e.message
+      );
+      const notes = [...issueMessages, ...(p.warnings || [])].join("; ");
       const price =
         p.price != null
           ? `${p.currency ? p.currency + " " : ""}${p.price}`
           : "—";
       tr.innerHTML = `
-        <td><span class="status-pill ${p.status}">${p.status}</span></td>
+        <td><span class="status-pill ${p.status}">${p.status.replace("_", " ")}</span></td>
         <td>${escapeHtml(p.name || "")}</td>
         <td>${escapeHtml(p.brand || "—")}</td>
         <td>${escapeHtml(p.sku || p.product_code || "—")}</td>

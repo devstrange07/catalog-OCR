@@ -19,6 +19,7 @@ from PIL import Image
 
 from app.config import settings
 from app.models.document import BBox, ParsedDocument, ParsedPage, TextBlock
+from app.stages.layout import build_regions
 from app.stages.spatial import group_into_rows
 
 logger = logging.getLogger(__name__)
@@ -163,15 +164,18 @@ def _gemini_extract_blocks(image: Image.Image, page_number: int) -> ParsedPage:
         )
         blocks.append(block)
     blocks = group_into_rows(blocks)
-    lines = [block.text for block in sorted(blocks, key=lambda b: b.reading_order)]
-
-    return ParsedPage(
+    page = ParsedPage(
         page_number=page_number,
         width=image.width,
         height=image.height,
         blocks=blocks,
-        full_text="\n".join(lines),
     )
+    blocks, regions = build_regions(page)
+    lines = [block.text for block in sorted(blocks, key=lambda b: b.reading_order)]
+    page.blocks = blocks
+    page.regions = regions
+    page.full_text = "\n".join(lines)
+    return page
 
 
 def parse_document_gemini(

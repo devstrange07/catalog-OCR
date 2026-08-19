@@ -62,7 +62,8 @@ class JobRecord(BaseModel):
     page_count: int | None = None
     candidate_count: int | None = None
     validated_count: int | None = None
-    rejected_count: int | None = None
+    needs_review_count: int | None = None
+    invalid_count: int | None = None
     products: list[ProductRecord] = Field(default_factory=list)
     parsed_preview: str | None = None
     progress: ProgressEvent | None = None

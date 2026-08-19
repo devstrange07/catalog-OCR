@@ -59,3 +59,17 @@ def test_dedupe_candidates_keeps_distinct_products_separate():
     merged = extract_stage._dedupe_candidates(candidates)
 
     assert len(merged) == 2
+
+
+def test_submit_products_tool_schema_includes_region_fields():
+    product_schema = extract_stage.SUBMIT_PRODUCTS_TOOL["function"]["parameters"]["properties"][
+        "products"
+    ]["items"]["properties"]
+    assert "region_id" in product_schema
+    assert "source_block_ids" in product_schema
+    assert product_schema["source_block_ids"]["items"]["type"] == "string"
+
+
+def test_system_prompt_instructs_region_scoped_extraction():
+    assert "region" in extract_stage.SYSTEM_PROMPT.lower()
+    assert "same region" in extract_stage.SYSTEM_PROMPT.lower()

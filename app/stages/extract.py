@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import defaultdict
 from typing import Any
 
 from openai import OpenAI
 
 from app.config import settings
-from app.models.document import ParsedDocument, ParsedPage
+from app.models.document import ParsedDocument, ParsedPage, format_page_text
 from app.models.product import CandidateProduct, PriceVariant, SubmitProductsArgs
 
 logger = logging.getLogger(__name__)
@@ -63,6 +62,19 @@ SUBMIT_PRODUCTS_TOOL: dict[str, Any] = {
                             "source_snippet": {
                                 "type": ["string", "null"],
                                 "description": "Short quote from parsed blocks (<=120 chars)",
+                            },
+                            "region_id": {
+                                "type": ["string", "null"],
+                                "description": (
+                                    "The [region ...] id this product's name/title line came from, "
+                                    "exactly as printed in the parsed text. Every field for this "
+                                    "product must come from this same region."
+                                ),
+                            },
+                            "source_block_ids": {
+                                "type": ["array", "null"],
+                                "description": "Block ids (e.g. p1-b3) this product's fields were read from.",
+                                "items": {"type": "string"},
                             },
                             "confidence": {
                                 "type": ["number", "null"],
@@ -120,8 +132,22 @@ SYSTEM_PROMPT = """You extract products from catalog and pamphlet text that was 
 
 Rules:
 - Use ONLY the provided parsed document text.
+- The text is grouped into "[region <id>]" blocks. Each region is one visual
+  card/heading on the page. Treat regions as hard boundaries: a product's
+  name, price, pack size, SKU, MRP/"was" price, offer code, and description
+  must all come from the SAME region. Never combine text from two different
+  region ids into one product, even if they appear on adjacent lines of the
+  rendered text.
+- Set region_id to the id of the region this product's name came from, and
+  source_block_ids to the block ids (e.g. p1-b3) you actually read fields
+  from. Leave a field out entirely (null) rather than pulling its value from
+  a different region — do not guess based on proximity in the raw text.
 - Identify distinct products (name, optional brand/sku/price/unit/description).
 - For multi-product pages, return every distinct product you can support with evidence.
+- Do not fold a separate size/attribute label (e.g. a short "Large"/"Small"
+  block next to the title) into the product name — put it in pack_size or a
+  price_variants.attribute_name instead, and keep the name as just the title
+  block's own text.
 - Set source_snippet to a short quote from the text (max ~120 characters); keep description brief.
 - Set page when known from headers like "--- Page N ---".
 - Populate price_variants whenever a single product/service has more than one
@@ -169,30 +195,7 @@ def _client() -> OpenAI:
 
 
 def _format_pages_text(pages: list[ParsedPage], max_chars: int) -> str:
-    parts: list[str] = []
-    for page in pages:
-        parts.append(f"--- Page {page.page_number} ---")
-        ordered_blocks = sorted(page.blocks, key=lambda b: b.reading_order)
-        grouped: dict[int, list] = defaultdict(list)
-        no_row_blocks = []
-        for block in ordered_blocks:
-            if block.row_id is None:
-                no_row_blocks.append(block)
-            else:
-                grouped[block.row_id].append(block)
-
-        for row_id in sorted(grouped):
-            row_blocks = sorted(grouped[row_id], key=lambda b: b.reading_order)
-            if row_blocks:
-                lead = f"[{row_blocks[0].block_id}] "
-                row_text = " | ".join(b.text for b in row_blocks)
-                parts.append(lead + row_text)
-
-        for block in no_row_blocks:
-            parts.append(f"[{block.block_id}] {block.text}")
-        if not page.blocks and page.full_text:
-            parts.append(page.full_text)
-    text = "\n".join(parts)
+    text = "\n".join(format_page_text(page) for page in pages)
     if len(text) > max_chars:
         return text[:max_chars] + "\n...[truncated]"
     return text

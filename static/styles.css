@@ -402,7 +402,12 @@ th {
   border-color: #9dcca8;
 }
 
-.status-pill.rejected {
+.status-pill.needs_review {
+  color: var(--warn);
+  border-color: #e0c58a;
+}
+
+.status-pill.invalid {
   color: var(--danger);
   border-color: #e0a8a8;
 }

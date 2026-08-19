@@ -291,22 +291,24 @@ def _run_extract_validate(job_id: str, parsed: ParsedDocument, on_progress: Prog
         [p.model_dump(mode="json") for p in products],
     )
     validated = sum(1 for p in products if p.status == ProductStatus.validated)
-    rejected = sum(1 for p in products if p.status == ProductStatus.rejected)
+    needs_review = sum(1 for p in products if p.status == ProductStatus.needs_review)
+    invalid = sum(1 for p in products if p.status == ProductStatus.invalid)
     _set_stage(job_id, STAGE_VALIDATE, StageStatus.completed)
     _update_job(
         job_id,
         status=JobStatus.completed,
         products=products,
         validated_count=validated,
-        rejected_count=rejected,
+        needs_review_count=needs_review,
+        invalid_count=invalid,
     )
     _emit_progress(
         job_id,
         "pipeline",
         "completed",
-        f"Done — {validated} validated, {rejected} rejected",
+        f"Done — {validated} validated, {needs_review} needs review, {invalid} invalid",
         percent=100,
-        detail={"validated": validated, "rejected": rejected},
+        detail={"validated": validated, "needs_review": needs_review, "invalid": invalid},
     )
 
 
