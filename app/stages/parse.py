@@ -25,20 +25,62 @@ from app.stages.spatial import group_into_rows
 logger = logging.getLogger(__name__)
 
 _ocr_engine = None
+_ocr_runtime = "cpu"
+
+
+def _paddle_has_cuda() -> bool:
+    """True only when this PaddlePaddle build can actually run on CUDA."""
+    try:
+        import paddle
+
+        return bool(paddle.device.is_compiled_with_cuda())
+    except Exception:
+        return False
 
 
 def _get_ocr():
     global _ocr_engine
+    global _ocr_runtime
     if _ocr_engine is None:
         from paddleocr import PaddleOCR
 
-        _ocr_engine = PaddleOCR(
-            lang=settings.ocr_lang,
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
-            enable_mkldnn=False,
-        )
+        requested_gpu = bool(settings.ocr_use_gpu)
+        gpu_id = max(int(settings.ocr_gpu_id), 0)
+
+        common_kwargs = {
+            "lang": settings.ocr_lang,
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+            "enable_mkldnn": False,
+        }
+
+        # PaddleOCR 3.x uses device="gpu:N" (use_gpu is a 2.x flag).
+        # PaddleX may also silently switch GPU→CPU if CUDA is unavailable,
+        # so we only claim CUDA after the Paddle build reports it.
+        if requested_gpu:
+            if not _paddle_has_cuda():
+                logger.warning(
+                    "OCR_USE_GPU=true but PaddlePaddle is not compiled with CUDA "
+                    "(install a paddlepaddle-gpu wheel). Falling back to CPU."
+                )
+            else:
+                os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+                try:
+                    _ocr_engine = PaddleOCR(device=f"gpu:{gpu_id}", **common_kwargs)
+                    _ocr_runtime = "cuda"
+                    logger.info("PaddleOCR initialized with CUDA (gpu_id=%s)", gpu_id)
+                    return _ocr_engine
+                except Exception as exc:
+                    logger.warning(
+                        "PaddleOCR CUDA init failed (gpu_id=%s): %s. Falling back to CPU.",
+                        gpu_id,
+                        exc,
+                    )
+
+        _ocr_engine = PaddleOCR(device="cpu", **common_kwargs)
+        _ocr_runtime = "cpu"
+        logger.info("PaddleOCR initialized on CPU.")
     return _ocr_engine
 
 
@@ -283,5 +325,8 @@ def parse_document(
             "ocr_engine": "paddleocr",
             "parser": "docling",
             "ocr_lang": settings.ocr_lang,
+            "ocr_runtime": _ocr_runtime,
+            "ocr_use_gpu_requested": settings.ocr_use_gpu,
+            "ocr_gpu_id_requested": settings.ocr_gpu_id,
         },
     )

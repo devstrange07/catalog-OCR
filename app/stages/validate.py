@@ -16,6 +16,17 @@ _CURRENCY_RE = re.compile(r"^[A-Za-z]{3}$")
 _PRICE_CLEAN_RE = re.compile(r"[^\d.\-]")
 _PRICE_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?")
 
+_VARIANT_PRICE_SENTINELS = {
+    "free",
+    "included",
+    "complimentary",
+    "n/a",
+    "na",
+    "tbd",
+    "on request",
+    "-",
+}
+
 
 def _normalize_price(value: float | str | None) -> tuple[float | None, list[str]]:
     errors: list[str] = []
@@ -46,18 +57,56 @@ def _normalize_currency(value: str | None) -> tuple[str | None, list[str]]:
     return code, warnings
 
 
+def _normalize_variant_price(
+    value: float | str | None,
+) -> tuple[float | None, str | None, str | None]:
+    """Returns (price, available, warning). Sentinel/unparseable values never raise errors."""
+    if value is None or value == "":
+        return None, None, None
+    if isinstance(value, (int, float)):
+        return float(value), None, None
+    text = str(value).strip()
+    lowered = text.lower()
+    if lowered in _VARIANT_PRICE_SENTINELS:
+        return None, lowered, None
+    cleaned = _PRICE_CLEAN_RE.sub("", text.replace(",", ""))
+    if not cleaned or cleaned in {".", "-", "-."}:
+        return None, None, f"Unparseable variant price: {value!r}"
+    try:
+        return float(cleaned), None, None
+    except ValueError:
+        return None, None, f"Unparseable variant price: {value!r}"
+
+
 def _normalize_price_variants(candidate: CandidateProduct) -> tuple[list[dict] | None, list[str]]:
-    errors: list[str] = []
+    """Returns (normalized_variants, product_level_errors). Variant price issues become
+    per-variant warnings, never product-level errors."""
+    product_level_errors: list[str] = []
     if not candidate.price_variants:
-        return None, errors
+        return None, product_level_errors
 
     normalized: list[dict] = []
     for variant in candidate.price_variants:
-        price, price_errors = _normalize_price(variant.price)
-        errors.extend(price_errors)
-        details = (variant.details or "").strip() or None
-        normalized.append({"label": variant.label, "price": price, "details": details})
-    return normalized, errors
+        price, available, warning = _normalize_variant_price(variant.price)
+        variant_warnings = list(variant.warnings)
+        if warning:
+            variant_warnings.append(warning)
+        normalized.append(
+            {
+                "label": variant.label,
+                "price": price,
+                "details": (variant.details or "").strip() or None,
+                "attribute_name": variant.attribute_name,
+                "sku": variant.sku,
+                "currency": variant.currency,
+                "unit": variant.unit,
+                "pack_size": variant.pack_size,
+                "available": available if available is not None else variant.available,
+                "is_default": variant.is_default,
+                "warnings": variant_warnings,
+            }
+        )
+    return normalized, product_level_errors
 
 
 def _best_name_block(blocks: list[TextBlock], name: str) -> TextBlock | None:
@@ -73,7 +122,10 @@ def _best_name_block(blocks: list[TextBlock], name: str) -> TextBlock | None:
 def _best_price_block(blocks: list[TextBlock], price_value: float | str | None) -> TextBlock | None:
     if price_value is None:
         return None
-    price_text = str(price_value)
+    if isinstance(price_value, float) and price_value.is_integer():
+        price_text = str(int(price_value))
+    else:
+        price_text = str(price_value)
     clean = _PRICE_CLEAN_RE.sub("", price_text.replace(",", ""))
     if not clean:
         return None
@@ -98,15 +150,26 @@ def _flag_spatial_mismatch(
     if not blocks:
         return
     name_block = _best_name_block(blocks, candidate.name)
+    if not name_block or name_block.row_id is None:
+        return
+
     price_block = _best_price_block(blocks, candidate.price)
-    if not name_block or not price_block:
-        return
-    if name_block.row_id is None or price_block.row_id is None:
-        return
-    if name_block.row_id != price_block.row_id:
-        warnings.append(
-            "Spatial check: name and price token are not on the same OCR row (possible row-shift)"
-        )
+    if price_block and price_block.row_id is not None:
+        if name_block.row_id != price_block.row_id:
+            warnings.append(
+                "Spatial check: name and price token are not on the same OCR row (possible row-shift)"
+            )
+
+    for variant in candidate.price_variants or []:
+        variant_block = _best_price_block(blocks, variant.price)
+        if not variant_block or variant_block.row_id is None:
+            continue
+        if name_block.row_id != variant_block.row_id:
+            label = variant.attribute_name or variant.label or "variant"
+            warnings.append(
+                f"Spatial check: variant '{label}' price token is not on the same OCR row "
+                "as name (possible row-shift)"
+            )
 
 
 def _validate_one(
@@ -124,6 +187,8 @@ def _validate_one(
     errors.extend(price_errors)
     price_variants, variant_errors = _normalize_price_variants(candidate)
     errors.extend(variant_errors)
+    for variant in price_variants or []:
+        warnings.extend(variant.get("warnings", []))
 
     currency, currency_warnings = _normalize_currency(candidate.currency)
     warnings.extend(currency_warnings)
@@ -144,6 +209,7 @@ def _validate_one(
             candidate.product_code,
             candidate.price,
             candidate.description,
+            candidate.price_variants,
         ]
     ):
         errors.append("Empty product shell")

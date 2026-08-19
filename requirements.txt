@@ -6,6 +6,10 @@ pydantic-settings>=2.6.0
 python-dotenv>=1.0.1
 openai>=1.55.0
 paddlepaddle>=2.6.0
+# Optional CUDA (Windows, CUDA 12.6): uninstall the CPU wheel, then install:
+#   pip uninstall paddlepaddle
+#   pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+# Do not add paddlepaddle-gpu as a hard requirement; CUDA availability varies by machine.
 paddleocr>=2.9.0
 docling>=2.15.0
 pypdfium2>=4.30.0

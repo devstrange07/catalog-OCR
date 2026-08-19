@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     parse_channel_default: str = "paddleocr"
     ocr_lang: str = "en"
+    ocr_use_gpu: bool = False
+    ocr_gpu_id: int = 0
     host: str = "0.0.0.0"
     port: int = 8000
     max_extract_chars: int = 24000

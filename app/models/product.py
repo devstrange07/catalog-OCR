@@ -17,6 +17,14 @@ class PriceVariant(BaseModel):
     label: str | None = None
     price: float | str | None = None
     details: str | None = None
+    attribute_name: str | None = None
+    sku: str | None = None
+    currency: str | None = None
+    unit: str | None = None
+    pack_size: str | None = None
+    available: bool | str | None = None
+    is_default: bool = False
+    warnings: list[str] = Field(default_factory=list)
 
 
 class CandidateProduct(BaseModel):

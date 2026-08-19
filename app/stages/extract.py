@@ -15,7 +15,7 @@ from openai import OpenAI
 
 from app.config import settings
 from app.models.document import ParsedDocument, ParsedPage
-from app.models.product import CandidateProduct, SubmitProductsArgs
+from app.models.product import CandidateProduct, PriceVariant, SubmitProductsArgs
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +71,31 @@ SUBMIT_PRODUCTS_TOOL: dict[str, Any] = {
                             },
                             "price_variants": {
                                 "type": ["array", "null"],
-                                "description": "Multiple price columns (e.g. Gravy/Hakka)",
+                                "description": "Distinct variants of this product/service (price columns, attribute options, tiers, etc.)",
                                 "items": {
                                     "type": "object",
                                     "properties": {
+                                        "attribute_name": {
+                                            "type": ["string", "null"],
+                                            "description": "Category the variant differs by, e.g. age group, size, portion, tier, color",
+                                        },
                                         "label": {"type": ["string", "null"]},
-                                        "price": {"type": ["number", "string", "null"]},
+                                        "price": {
+                                            "type": ["number", "string", "null"],
+                                            "description": "Numeric price for this variant. Leave null if the variant has no numeric price; use available instead.",
+                                        },
+                                        "currency": {"type": ["string", "null"]},
+                                        "unit": {"type": ["string", "null"]},
+                                        "pack_size": {"type": ["string", "null"]},
+                                        "sku": {"type": ["string", "null"]},
+                                        "available": {
+                                            "type": ["string", "boolean", "null"],
+                                            "description": "Non-numeric availability phrase for this variant (e.g. free, included, on request) when price is null",
+                                        },
+                                        "is_default": {
+                                            "type": ["boolean", "null"],
+                                            "description": "True for exactly one variant per product: the one the top-level price/unit should mirror",
+                                        },
                                         "details": {
                                             "type": ["string", "null"],
                                             "description": "Short description/inclusions specific to this variant",
@@ -105,9 +124,26 @@ Rules:
 - For multi-product pages, return every distinct product you can support with evidence.
 - Set source_snippet to a short quote from the text (max ~120 characters); keep description brief.
 - Set page when known from headers like "--- Page N ---".
-- If a row has multiple price columns (e.g. Gravy/Hakka, Half/Full), populate
-  price_variants in left-to-right order using the column headers as labels.
-  Keep price as the first listed variant value for backward compatibility.
+- Populate price_variants whenever a single product/service has more than one
+  distinct option. Classify each case as follows:
+  - Tabular multi-column price layout: one row, several price-bearing columns
+    under distinct headers. Emit one variant per column, in left-to-right
+    order, with attribute_name set to the column-header category and label
+    set to the header text.
+  - Enumerated attribute list with a shared price: options differ only by a
+    named attribute (size, color, pack) with no price difference. Set
+    attribute_name to the attribute category and price to the shared price
+    (or null if not restated per option).
+  - Tiered or plan-based offering described without a table: distinct named
+    tiers/plans, each with its own price or price-equivalent phrase. Treat
+    identically to the tabular case, with attribute_name set to a tier/plan
+    designation.
+  - Non-numeric price phrase for one option (e.g. a free or on-request
+    option): set that variant's price to null and put the literal phrase in
+    available. Never write a non-numeric phrase into price.
+- Mark exactly one variant per product with is_default=true — the option the
+  top-level price/unit fields should mirror. Keep the top-level price equal
+  to that default variant's price for backward compatibility.
 - If a variant has its own description/inclusions text, capture it in
   price_variants.details and keep it brief (<=120 chars).
 - If no products are present, call submit_products with an empty products array.
@@ -170,16 +206,53 @@ def _chunk_pages(pages: list[ParsedPage], pages_per_chunk: int) -> list[list[Par
     return [pages[i : i + pages_per_chunk] for i in range(0, len(pages), pages_per_chunk)]
 
 
+def _variant_match_key(variant: PriceVariant) -> str:
+    return (variant.attribute_name or variant.label or "").strip().lower()
+
+
+def _merge_variants(
+    base: list[PriceVariant] | None, incoming: list[PriceVariant] | None
+) -> list[PriceVariant] | None:
+    """Unions two variant lists, matching on (attribute_name or label). On a
+    match, keeps whichever side already has a non-null price; unmatched
+    incoming variants are appended."""
+    if not incoming:
+        return base
+    if not base:
+        return list(incoming)
+
+    merged = list(base)
+    index_by_key = {
+        _variant_match_key(v): i for i, v in enumerate(merged) if _variant_match_key(v)
+    }
+    for variant in incoming:
+        key = _variant_match_key(variant)
+        if key and key in index_by_key:
+            existing = merged[index_by_key[key]]
+            if existing.price is None and variant.price is not None:
+                merged[index_by_key[key]] = variant
+        else:
+            merged.append(variant)
+            if key:
+                index_by_key[key] = len(merged) - 1
+    return merged
+
+
 def _dedupe_candidates(candidates: list[CandidateProduct]) -> list[CandidateProduct]:
-    seen: set[tuple[str, int | None, str | None]] = set()
-    out: list[CandidateProduct] = []
+    """Groups candidates by (name, page, sku); duplicate-keyed candidates are
+    merged into the first occurrence instead of dropped, unioning their
+    price_variants so a variant table split across chunks isn't lost."""
+    order: list[tuple[str, int | None, str | None]] = []
+    groups: dict[tuple[str, int | None, str | None], CandidateProduct] = {}
     for c in candidates:
         key = (c.name.strip().lower(), c.page, c.sku)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(c)
-    return out
+        if key not in groups:
+            groups[key] = c
+            order.append(key)
+        else:
+            base = groups[key]
+            base.price_variants = _merge_variants(base.price_variants, c.price_variants)
+    return [groups[key] for key in order]
 
 
 def _parse_tool_args(raw: str) -> list[CandidateProduct]:

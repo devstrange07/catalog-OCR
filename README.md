@@ -32,8 +32,41 @@ Optional Gemini parse channel settings:
 - `GEMINI_API_KEY` — required only when parse channel is `gemini`
 - `GEMINI_MODEL` — defaults to `gemini-2.5-flash`
 - `PARSE_CHANNEL_DEFAULT` — defaults to `paddleocr`
+- `OCR_USE_GPU` — set `true` to request CUDA for PaddleOCR
+- `OCR_GPU_ID` — CUDA device index (default `0`)
 
 Optional crawl settings: `CRAWL_TIMEOUT_SEC`, `CRAWL_HEADLESS`.
+
+## Optional: CUDA setup for PaddleOCR (Windows)
+
+Use this only when you run Stage-1 with `parse_channel=paddleocr`. The Gemini parse channel is remote and does not use your local GPU.
+
+CUDA here accelerates **PaddleOCR detection/recognition only**. Docling layout still runs on CPU (torch / RapidOCR) regardless of `OCR_USE_GPU`.
+
+1. Install/update NVIDIA GPU driver.
+2. Replace the CPU `paddlepaddle` wheel with a CUDA-compatible `paddlepaddle-gpu` wheel. An NVIDIA driver alone is not enough if `paddle.device.is_compiled_with_cuda()` is `False`. Confirmed working on this project (Python 3.13, CUDA 12.6, RTX 4060):
+
+```bash
+pip uninstall paddlepaddle
+pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+```
+
+3. Verify CUDA is visible (run this in a fresh interpreter, before importing other GPU libraries):
+
+```bash
+python -c "import paddle; print('compiled_with_cuda=', paddle.device.is_compiled_with_cuda()); print('device=', paddle.device.get_device())"
+```
+
+Expected: `compiled_with_cuda= True` and `device= gpu:0`.
+
+4. Enable GPU in `.env`:
+
+```env
+OCR_USE_GPU=true
+OCR_GPU_ID=0
+```
+
+If CUDA is unavailable (CPU-only Paddle wheel, driver/runtime mismatch, missing libs), this app logs a warning and automatically falls back to CPU OCR. Check `parsed.json` → `meta.ocr_runtime` (`cpu` vs `cuda`) to confirm the effective device. You may also see a cuDNN minor-version warning (for example Paddle built with 9.9 vs local 9.5); OCR can still run on GPU.
 
 ## Run
 
@@ -67,7 +100,7 @@ Each job writes under `outputs/{job_id}/`:
 - `crawl.json` — URL jobs only (fetch kind, URLs, markdown preview / file meta, internal links)
 - `parsed.json` — Stage 1 structure (no product schema)
 - `candidates.json` — Stage 2 tool-call output
-- `products.json` — Stage 3 validated/rejected records
+- `products.json` — Stage 3 validated/rejected records, each optionally carrying `price_variants` (see Notes)
 
 ## Samples
 
@@ -77,7 +110,55 @@ Drop your own catalog PDFs or images into `samples/`. Nothing is bundled (copyri
 
 - First PaddleOCR run may download PaddleOCR models.
 - On Windows CPU, PaddleOCR is initialized with `enable_mkldnn=False` to avoid a known oneDNN/PIR crash.
+- OCR runtime metadata is written to `parsed.json` under `meta`:
+  - `ocr_runtime`: `cpu` or `cuda`
+  - `ocr_use_gpu_requested`: requested GPU mode from config
+  - `ocr_gpu_id_requested`: requested GPU id
 - Docling is used for PDF layout/markdown; its own OCR is disabled because PaddleOCR is primary. Image-only Docling failures are non-fatal — extraction still uses PaddleOCR text.
 - Gemini channel uses a vision model to produce Stage-1 text blocks; if `GEMINI_API_KEY` is missing and channel is `gemini`, Stage-1 fails clearly.
 - Missing `DEEPSEEK_API_KEY` fails Stage 2 clearly — it will not invent products from OCR.
+- Product variants: a product's `price_variants` covers any distinct option of that product/service —
+  price-column tables (age tiers, portion sizes), attribute-only options with no price difference
+  (size, color, pack), and tiered/plan-based offerings. Each variant carries `attribute_name`,
+  `label`, `price`, `currency`, `unit`, `pack_size`, `sku`, `available`, `is_default`, and `details`.
+  Exactly one variant per product is marked `is_default`; the top-level `price`/`unit` mirror that
+  variant for backward compatibility.
+  - Non-numeric variant prices (free, included, complimentary, n/a, tbd, on request, `-`) are recorded
+    in `available`, not treated as errors.
+  - A variant with an unparseable price never rejects the whole product — it adds a warning
+    (on both the variant and the product) instead of a `validation_errors` entry. A product is only
+    `rejected` when `name` is empty and no other identity/value field (brand, sku, product_code, price,
+    description, price_variants) is present.
+  - Stage 2 candidates are grouped by `(name, page, sku)` before validation; duplicate-keyed candidates
+    (e.g. a variant table split across a chunk boundary) have their `price_variants` merged rather than
+    the later occurrence being dropped.
 - Unit tests: `python -m pytest tests -q`
+
+## Benchmark checklist (CPU vs CUDA)
+
+1. Pick one representative multi-page PDF/image and keep all env/settings constant except OCR runtime.
+2. Run with CPU:
+   - `OCR_USE_GPU=false`
+   - submit a job with `parse_channel=paddleocr`
+   - record Stage-1 wall time from logs/job progress, split PaddleOCR vs Docling if possible.
+3. Run with CUDA:
+   - `OCR_USE_GPU=true`, `OCR_GPU_ID=0` (or target GPU)
+   - submit the same file and record Stage-1 wall time.
+4. Compare:
+   - elapsed time and approximate pages/sec (`page_count / ocr_seconds`)
+   - `parsed.json -> meta.ocr_runtime` should be `cpu` vs `cuda`.
+5. Validate output parity:
+   - `parsed.json` shape is valid for both runs
+   - downstream candidate/product counts are materially consistent.
+
+Worked example (`tours&travels.png`, 1 page, RTX 4060, paddlepaddle-gpu 3.3.0 / CUDA 12.6):
+
+| Step | CPU (previous run) | CUDA |
+|------|--------------------|------|
+| PaddleOCR init + page OCR | ~118 s (remainder of Stage-1 after Docling) | 12.98 s init + 2.81 s OCR = **15.8 s** |
+| Docling layout (still CPU) | 137 s | 146 s |
+| Stage-1 total | 255 s | 162 s |
+| Text blocks | 261 | 261 |
+| `meta.ocr_runtime` | `cpu` (CPU wheel) | `cuda` |
+
+CUDA sped up the PaddleOCR step by about **7x** on this image. Overall Stage-1 was about **1.6x** faster because Docling remains CPU-bound.
