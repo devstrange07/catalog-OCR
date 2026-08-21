@@ -24,6 +24,7 @@ class JobStatus(str, Enum):
 class ParseChannel(str, Enum):
     paddleocr = "paddleocr"
     gemini = "gemini"
+    unlimited_ocr = "unlimited_ocr"
 
 
 class StageStatus(str, Enum):

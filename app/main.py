@@ -19,8 +19,8 @@ logging.basicConfig(
 app = FastAPI(
     title="Catalog Product Extraction POC",
     description=(
-        "3-stage pipeline: Document Parsing (PaddleOCR+Docling or Gemini Vision) → "
-        "Product Extraction (deepseek-v4-flash tool call) → Validation. "
+        "3-stage pipeline: Document Parsing (PaddleOCR+Docling, Gemini Vision, or Unlimited-OCR) → "
+        "Product Extraction (gemini-2.5-flash structured JSON) → Validation. "
         "OCR never emits final product records."
     ),
     version="0.1.0",
