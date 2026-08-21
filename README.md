@@ -135,7 +135,7 @@ Each job writes under `outputs/{job_id}/`:
 - `crawl.json` — URL jobs only (fetch kind, URLs, markdown preview / file meta, internal links)
 - `parsed.json` — Stage 1 structure (no product schema)
 - `candidates.json` — Stage 2 tool-call output
-- `products.json` — Stage 3 validated/rejected records, each optionally carrying `price_variants` (see Notes)
+- `products.json` — Stage 3 validated/rejected records (domain-agnostic schema; see Notes)
 
 ## Samples
 
@@ -153,21 +153,19 @@ Drop your own catalog PDFs or images into `samples/`. Nothing is bundled (copyri
 - Gemini channel sends the **original** file to Gemini in one request (no local page rasterization). Files ≤ 15 MB go as `inline_data` with the correct MIME; larger files use the Gemini Files API (`file_data`). Besides PDF/images, Gemini Stage 1 also accepts text formats: `.csv`, `.txt`, `.md`, `.html`, `.htm`, `.xml`, `.json`, `.rtf` (text-as-text; not visual layout). These text types are **Gemini-channel only** — PaddleOCR/Unlimited-OCR uploads reject them. `.xlsx` / `.doc` / `.docx` are **not** supported (Gemini rejects Office Open XML MIME types). If `GEMINI_API_KEY` is missing and channel is `gemini`, Stage-1 fails clearly.
 - Unlimited-OCR channel runs `baidu/Unlimited-OCR` via HF `transformers` (local CUDA) **or** a Colab-hosted endpoint (e.g. Cloudflare quick tunnel) when `UNLIMITED_OCR_REMOTE_URL` is set. It produces per-page markdown. A local CUDA GPU is required only when no remote URL is configured. `transformers>=4.57.0,<4.58.0` is pinned per the model card; this may conflict with Docling's own transformers dependency — use a fresh venv if pip resolution fails.
 - Stage 2 always uses Gemini structured JSON (`GEMINI_MODEL`, default `gemini-2.5-flash`). Missing `GEMINI_API_KEY` fails Stage 2 clearly — it will not invent products from OCR.
-- Product variants: a product's `price_variants` covers any distinct option of that product/service —
-  price-column tables (age tiers, portion sizes), attribute-only options with no price difference
-  (size, color, pack), and tiered/plan-based offerings. Each variant carries `attribute_name`,
-  `label`, `price`, `currency`, `unit`, `pack_size`, `sku`, `available`, `is_default`, and `details`.
-  Exactly one variant per product is marked `is_default`; the top-level `price`/`unit` mirror that
-  variant for backward compatibility.
-  - Non-numeric variant prices (free, included, complimentary, n/a, tbd, on request, `-`) are recorded
-    in `available`, not treated as errors.
-  - A variant with an unparseable price never rejects the whole product — it adds a warning
-    (on both the variant and the product) instead of a `validation_errors` entry. A product is only
-    `rejected` when `name` is empty and no other identity/value field (brand, sku, product_code, price,
-    description, price_variants) is present.
-  - Stage 2 candidates are grouped by `(name, page, sku)` before validation; duplicate-keyed candidates
-    (e.g. a variant table split across a chunk boundary) have their `price_variants` merged rather than
-    the later occurrence being dropped.
+- Product schema is domain-agnostic (retail, SaaS, B2B, menus, healthcare, listings, etc.):
+  - `item_type`: product | service | bundle | plan | event | addon | listing | announcement | other
+  - `availability` (market status) is separate from pipeline `status` (validated | rejected)
+  - `list_price` = reference/original price (MSRP, MRP, RRP, rack rate); `price` = current selling price
+  - `price_tiers` = different prices for the *same* configuration (list vs sale, monthly vs annual, volume bands)
+  - `variants` = genuinely different configurations (`attribute` + `label`, e.g. Size/500ml, Plan/Pro)
+  - Also supports `discount`, `promotion`, `validity`, `includes`, `conditions`, `tags`,
+    `billing_cycle`, `price_qualifier`, `minimum_order`, `quantity`
+  - Currency symbols (₹, $, €, …) are normalized to ISO codes (INR, USD, EUR, …)
+  - Non-numeric variant prices (free, included, on request, …) go in `available`, not as errors
+  - Unparseable variant/tier prices warn; they do not reject the product
+  - Stage 2 candidates are grouped by `(name, page, sku)`; duplicate-keyed chunks merge
+    `variants` and `price_tiers` instead of dropping the later occurrence
 - Unit tests: `python -m pytest tests -q`
 
 ## Benchmark checklist (CPU vs CUDA)

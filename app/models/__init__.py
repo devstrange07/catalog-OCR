@@ -8,10 +8,16 @@ from app.models.pipeline import (
     StageStatus,
 )
 from app.models.product import (
+    Availability,
     CandidateProduct,
+    Discount,
+    ItemType,
+    PriceTier,
     ProductRecord,
     ProductStatus,
+    Promotion,
     SubmitProductsArgs,
+    Variant,
 )
 
 __all__ = [
@@ -25,8 +31,14 @@ __all__ = [
     "ProgressEvent",
     "StageInfo",
     "StageStatus",
+    "Availability",
     "CandidateProduct",
+    "Discount",
+    "ItemType",
+    "PriceTier",
     "ProductRecord",
     "ProductStatus",
+    "Promotion",
     "SubmitProductsArgs",
+    "Variant",
 ]
