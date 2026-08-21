@@ -1,12 +1,12 @@
-"""Ensure Stage 2 refuses to invent products without an API key."""
+"""Ensure Stage 2 refuses to invent products without a Gemini API key."""
 
 from app.config import settings
 from app.models.document import ParsedDocument, ParsedPage, TextBlock
-from app.stages.extract import extract_products
+from app.stages.extract_gemini import extract_products_gemini
 
 
-def test_extract_requires_api_key(monkeypatch):
-    monkeypatch.setattr(settings, "deepseek_api_key", "")
+def test_extract_gemini_requires_api_key(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_api_key", "")
     doc = ParsedDocument(
         source_filename="x.png",
         source_path="x.png",
@@ -20,7 +20,7 @@ def test_extract_requires_api_key(monkeypatch):
         ],
     )
     try:
-        extract_products(doc)
+        extract_products_gemini(doc)
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
-        assert "DEEPSEEK_API_KEY" in str(exc)
+        assert "GEMINI_API_KEY" in str(exc)

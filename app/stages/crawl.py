@@ -17,21 +17,15 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from app.config import settings
+from app.file_types import GEMINI_TEXT_SUFFIXES, IMAGE_PDF_SUFFIXES, mime_for_suffix
 from app.models.document import ParsedDocument, ParsedPage, TextBlock
 
 logger = logging.getLogger(__name__)
 
-BINARY_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+BINARY_SUFFIXES = IMAGE_PDF_SUFFIXES | GEMINI_TEXT_SUFFIXES
 
 SUFFIX_TO_CONTENT_TYPE = {
-    ".pdf": "application/pdf",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-    ".bmp": "image/bmp",
-    ".tif": "image/tiff",
-    ".tiff": "image/tiff",
+    suffix: mime_for_suffix(suffix) for suffix in BINARY_SUFFIXES
 }
 
 ProgressCallback = Callable[..., None]

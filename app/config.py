@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     extract_max_tokens: int = 8192
     crawl_timeout_sec: int = 60
     crawl_headless: bool = True
+    unlimited_ocr_model: str = "baidu/Unlimited-OCR"
+    unlimited_ocr_gpu_id: int = 0
+    unlimited_ocr_max_length: int = 32768
+    unlimited_ocr_base_size: int = 1024
+    unlimited_ocr_image_size: int = 640
+    unlimited_ocr_no_repeat_ngram_size: int = 35
+    unlimited_ocr_ngram_window: int = 128
+    unlimited_ocr_remote_url: str = ""
+    unlimited_ocr_remote_api_key: str = ""
+    unlimited_ocr_remote_timeout_sec: int = 180
 
 
 settings = Settings()

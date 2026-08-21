@@ -29,19 +29,46 @@
 
   function selectedParseChannel() {
     const checked = form.querySelector('input[name="parseChannel"]:checked');
-    return checked?.value === "gemini" ? "gemini" : "paddleocr";
+    if (checked?.value === "gemini") return "gemini";
+    if (checked?.value === "unlimited_ocr") return "unlimited_ocr";
+    return "paddleocr";
+  }
+
+  const ACCEPT_IMAGE_PDF = ".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff";
+  const ACCEPT_GEMINI_TEXT = ",.csv,.txt,.md,.html,.htm,.xml,.json,.rtf";
+
+  function syncFileAccept() {
+    const channel = selectedParseChannel();
+    const dropHint = document.getElementById("dropHint");
+    if (channel === "gemini") {
+      fileInput.accept = ACCEPT_IMAGE_PDF + ACCEPT_GEMINI_TEXT;
+      if (dropHint) {
+        dropHint.textContent =
+          "or click to browse · PDF, images, CSV, TXT, MD, HTML, XML, JSON, RTF";
+      }
+    } else {
+      fileInput.accept = ACCEPT_IMAGE_PDF;
+      if (dropHint) {
+        dropHint.textContent = "or click to browse · PDF, PNG, JPG";
+      }
+    }
   }
 
   function channelLabel(channel) {
-    return channel === "gemini" ? "Gemini Vision" : "PaddleOCR";
+    if (channel === "gemini") return "Gemini Vision";
+    if (channel === "unlimited_ocr") return "Unlimited OCR";
+    return "PaddleOCR";
   }
 
   function setParseStageHint(channel) {
     if (!parseStageHint) return;
-    parseStageHint.textContent =
-      channel === "gemini"
-        ? "Gemini Vision → structure only"
-        : "PaddleOCR + Docling → structure only";
+    if (channel === "gemini") {
+      parseStageHint.textContent = "Gemini Vision → structure only";
+    } else if (channel === "unlimited_ocr") {
+      parseStageHint.textContent = "Unlimited-OCR markdown → structure only";
+    } else {
+      parseStageHint.textContent = "PaddleOCR + Docling → structure only";
+    }
   }
 
   function updateSubmitEnabled() {
@@ -77,6 +104,14 @@
     }
   });
   fileInput.addEventListener("change", () => setFile(fileInput.files?.[0]));
+  form.querySelectorAll('input[name="parseChannel"]').forEach((el) => {
+    el.addEventListener("change", () => {
+      syncFileAccept();
+      setParseStageHint(selectedParseChannel());
+    });
+  });
+  syncFileAccept();
+  setParseStageHint(selectedParseChannel());
   urlInput?.addEventListener("input", () => {
     if (urlValue() && selectedFile) {
       selectedFile = null;

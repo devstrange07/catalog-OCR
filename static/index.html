@@ -15,8 +15,8 @@
       <p class="brand">Product OCR</p>
       <h1>Catalog &amp; pamphlet extractor</h1>
       <p class="lede">
-        Upload a catalog file or paste a single URL. Choose PaddleOCR or Gemini Vision,
-        then extract via tool call and validate. OCR never writes the final product record.
+        Upload a catalog file or paste a single URL. Choose a parse channel,
+        then extract products with Gemini and validate. OCR never writes the final product record.
       </p>
     </header>
 
@@ -24,8 +24,8 @@
       <form id="uploadForm">
         <label class="dropzone" id="dropzone" for="fileInput">
           <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff" hidden />
-          <span class="drop-title">Drop a catalog PDF or image</span>
-          <span class="drop-hint">or click to browse · PDF, PNG, JPG</span>
+          <span class="drop-title">Drop a catalog file</span>
+          <span class="drop-hint" id="dropHint">or click to browse · PDF, PNG, JPG</span>
           <span class="file-name" id="fileName"></span>
         </label>
         <div class="url-row">
@@ -47,6 +47,10 @@
           <label>
             <input type="radio" name="parseChannel" value="gemini" />
             Gemini Vision
+          </label>
+          <label>
+            <input type="radio" name="parseChannel" value="unlimited_ocr" />
+            Unlimited OCR
           </label>
         </fieldset>
         <button type="submit" id="submitBtn" disabled>Run pipeline</button>
@@ -76,7 +80,7 @@
           <span class="stage-num">2</span>
           <div>
             <strong>Product Extraction</strong>
-            <p>deepseek-v4-flash · forced <code>submit_products</code></p>
+            <p>gemini-2.5-flash · structured JSON</p>
           </div>
           <span class="badge" data-badge>pending</span>
         </li>

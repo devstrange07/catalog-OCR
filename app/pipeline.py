@@ -23,9 +23,10 @@ from app.stages.crawl import (
     normalize_url,
     parsed_document_from_markdown,
 )
-from app.stages.extract import extract_products
+from app.stages.extract_gemini import extract_products_gemini
 from app.stages.parse import parse_document
 from app.stages.parse_gemini import parse_document_gemini
+from app.stages.parse_unlimited_ocr import parse_document_unlimited_ocr
 from app.stages.validate import validate_products
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ def _resolve_parse_channel(value: str | ParseChannel | None) -> ParseChannel:
     try:
         return ParseChannel(normalized)
     except ValueError as exc:
-        raise ValueError(f"Unsupported parse channel '{raw}'. Use paddleocr or gemini.") from exc
+        raise ValueError(f"Unsupported parse channel '{raw}'. Use paddleocr, gemini, or unlimited_ocr.") from exc
 
 
 def _now() -> datetime:
@@ -233,7 +234,9 @@ def _fail_pipeline(job_id: str, exc: Exception, stage_order: list[str]) -> None:
     _update_job(job_id, status=JobStatus.failed, error=str(exc))
 
 
-def _run_extract_validate(job_id: str, parsed: ParsedDocument, on_progress: ProgressCallback) -> None:
+def _run_extract_validate(
+    job_id: str, parsed: ParsedDocument, on_progress: ProgressCallback
+) -> None:
     out = _job_dir(job_id)
 
     _update_job(job_id, status=JobStatus.extracting)
@@ -245,7 +248,7 @@ def _run_extract_validate(job_id: str, parsed: ParsedDocument, on_progress: Prog
         "Starting product extraction…",
         percent=56,
     )
-    candidates = extract_products(parsed, on_progress=on_progress)
+    candidates = extract_products_gemini(parsed, on_progress=on_progress)
     _emit_progress(
         job_id,
         STAGE_EXTRACT,
@@ -318,6 +321,8 @@ def _parse_document_for_channel(
 ) -> ParsedDocument:
     if parse_channel == ParseChannel.gemini:
         return parse_document_gemini(source, source_filename=filename, on_progress=on_progress)
+    if parse_channel == ParseChannel.unlimited_ocr:
+        return parse_document_unlimited_ocr(source, source_filename=filename, on_progress=on_progress)
     return parse_document(source, source_filename=filename, on_progress=on_progress)
 
 
