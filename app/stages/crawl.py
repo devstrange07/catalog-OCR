@@ -22,7 +22,9 @@ from app.models.document import ParsedDocument, ParsedPage, TextBlock
 
 logger = logging.getLogger(__name__)
 
-BINARY_SUFFIXES = IMAGE_PDF_SUFFIXES | GEMINI_TEXT_SUFFIXES
+# Downloadable URL suffixes (OCR/Gemini file path). Keep .html/.htm on crawl4ai —
+# those are web pages, even though Gemini accepts them as direct file uploads.
+BINARY_SUFFIXES = IMAGE_PDF_SUFFIXES | (GEMINI_TEXT_SUFFIXES - {".html", ".htm"})
 
 SUFFIX_TO_CONTENT_TYPE = {
     suffix: mime_for_suffix(suffix) for suffix in BINARY_SUFFIXES

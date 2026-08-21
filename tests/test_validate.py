@@ -268,3 +268,252 @@ def test_validate_item_type_and_availability_aliases():
     assert records[1].item_type == ItemType.plan
     assert records[1].availability == Availability.on_request
     assert records[1].price_qualifier == "on_request"
+
+
+def test_validate_passes_project_name_and_location():
+    records = validate_products(
+        [
+            CandidateProduct(
+                name="2BHK Flat",
+                sku="RY-0001",
+                project_name="Skyline Vistas",
+                location="Whitefield, Bangalore",
+                category="RESIDENTIAL: APARTMENTS",
+                price=10300000,
+                currency="INR",
+            )
+        ]
+    )
+    assert records[0].status == ProductStatus.validated
+    assert records[0].project_name == "Skyline Vistas"
+    assert records[0].location == "Whitefield, Bangalore"
+
+
+def test_flag_scope_anomalies_promotion_bleed():
+    """Same promo across distinct projects on >50% of items → warning + confidence drop."""
+    promo = Promotion(type="other", label="Free club membership", details="on 3BHK+")
+    candidates = [
+        CandidateProduct(
+            name="3BHK Flat",
+            sku=f"RY-{i:04d}",
+            project_name="Skyline Vistas" if i <= 4 else "Greenpark Enclave",
+            category="RESIDENTIAL: APARTMENTS",
+            price=10000000 + i,
+            currency="INR",
+            promotion=promo,
+            confidence=1.0,
+        )
+        for i in range(1, 7)
+    ]
+    records = validate_products(candidates)
+    assert all(
+        "Promotion may be over-applied across sections" in r.warnings for r in records
+    )
+    assert all(r.confidence == 0.8 for r in records)
+
+
+def test_flag_scope_anomalies_conditions_bleed():
+    shared_conditions = [
+        "Possession Dec 2028.",
+        "10% booking, 80% link-plan.",
+        "Bank tie-ups: SBI, HDFC, ICICI — EMI from 8.35% p.a.",
+    ]
+    candidates = [
+        CandidateProduct(
+            name="2BHK Flat",
+            sku="RY-0001",
+            project_name="Skyline Vistas",
+            category="RESIDENTIAL: APARTMENTS",
+            price=10300000,
+            conditions=shared_conditions,
+            confidence=1.0,
+        ),
+        CandidateProduct(
+            name="2BHK Flat",
+            sku="RY-0011",
+            project_name="Greenpark Enclave",
+            category="RESIDENTIAL: APARTMENTS",
+            price=9400000,
+            conditions=shared_conditions,
+            confidence=1.0,
+        ),
+        CandidateProduct(
+            name="Metro Heights",
+            project_name="Metro Heights",
+            category="MORE APARTMENT PROJECTS",
+            price=8200000,
+            conditions=shared_conditions,
+            confidence=1.0,
+        ),
+    ]
+    records = validate_products(candidates)
+    assert all(
+        "Conditions may be over-applied from a single section" in r.warnings
+        for r in records
+    )
+    assert all(r.confidence == 0.8 for r in records)
+
+
+def test_realy_scope_expectations_on_correct_extraction():
+    """Correct RealY-like scoping should not trigger bleed warnings.
+
+    Mirrors the pamphlet layout:
+    - Skyline: no club promo; has possession/booking terms
+    - Greenpark 3BHK+: club promo; no Skyline possession terms
+    - Snapshot projects: page-level GST only
+    """
+    skyline_conditions = [
+        "All prices incl. applicable GST",
+        "RERA registered",
+        "Stamp duty & registration extra.",
+        "Possession Dec 2028.",
+        "10% booking, 80% link-plan.",
+    ]
+    greenpark_promo = Promotion(
+        type="other", label="Free club membership", details="on 3BHK+"
+    )
+    page_legal = [
+        "All prices incl. applicable GST",
+        "RERA registered",
+        "Stamp duty & registration extra.",
+    ]
+
+    candidates = [
+        CandidateProduct(
+            name="2BHK Flat",
+            sku="RY-0001",
+            project_name="Skyline Vistas",
+            location="Whitefield, Bangalore",
+            category="RESIDENTIAL: APARTMENTS",
+            price=10300000,
+            currency="INR",
+            unit="sqft",
+            pack_size="1080 sqft",
+            conditions=skyline_conditions,
+            page=2,
+            confidence=0.95,
+            price_tiers=[PriceTier(label="EMI", price=59999, billing_cycle="monthly")],
+        ),
+        CandidateProduct(
+            name="3BHK Flat",
+            sku="RY-0003",
+            project_name="Skyline Vistas",
+            location="Whitefield, Bangalore",
+            category="RESIDENTIAL: APARTMENTS",
+            price=13800000,
+            currency="INR",
+            unit="sqft",
+            conditions=skyline_conditions,
+            page=2,
+            confidence=0.95,
+            price_tiers=[PriceTier(label="EMI", price=80499, billing_cycle="monthly")],
+        ),
+        CandidateProduct(
+            name="3BHK Flat",
+            sku="RY-0012",
+            project_name="Greenpark Enclave",
+            location="Sarjapur, Bangalore",
+            category="RESIDENTIAL: APARTMENTS",
+            price=11900000,
+            currency="INR",
+            unit="sqft",
+            promotion=greenpark_promo,
+            conditions=page_legal,
+            page=2,
+            confidence=0.95,
+        ),
+        CandidateProduct(
+            name="Metro Heights",
+            project_name="Metro Heights",
+            location="Yelahanka, Bangalore",
+            category="MORE APARTMENT PROJECTS",
+            price=8200000,
+            currency="INR",
+            price_qualifier="from",
+            conditions=page_legal,
+            page=2,
+            confidence=0.9,
+            price_tiers=[PriceTier(label="per sqft", price=7600)],
+        ),
+    ]
+    records = validate_products(candidates)
+    assert all(r.status == ProductStatus.validated for r in records)
+    assert all(
+        "Promotion may be over-applied across sections" not in r.warnings
+        for r in records
+    )
+    # page_legal on 2/4 items is not a majority bleed; skyline terms stay local
+    assert all(
+        "Conditions may be over-applied from a single section" not in r.warnings
+        for r in records
+    )
+    assert records[0].page == 2
+    assert records[0].promotion is None
+    assert records[2].promotion is not None
+    assert "Free club membership" in (records[2].promotion.label or "")
+    assert any(t.label == "EMI" for t in (records[0].price_tiers or []))
+
+
+def test_realy_bleed_pattern_is_flagged():
+    """The buggy RealY extraction pattern (club promo on Skyline + shared A terms) is flagged."""
+    club = Promotion(type="other", label="Free club membership", details="on 3BHK+")
+    bloated = [
+        "All prices incl. applicable GST",
+        "RERA registered",
+        "Stamp duty & registration extra.",
+        "10% booking, 80% link-plan.",
+        "Possession Dec 2028.",
+        "Bank tie-ups: SBI, HDFC, ICICI — EMI from 8.35% p.a.",
+    ]
+    candidates = []
+    for i in range(1, 5):
+        candidates.append(
+            CandidateProduct(
+                name="3BHK Flat",
+                sku=f"RY-{i:04d}",
+                project_name="Skyline Vistas",
+                category="RESIDENTIAL: APARTMENTS",
+                price=14000000,
+                promotion=club,
+                conditions=bloated,
+                confidence=1.0,
+                page=1,
+            )
+        )
+    for i in range(11, 14):
+        candidates.append(
+            CandidateProduct(
+                name="3BHK Flat",
+                sku=f"RY-{i:04d}",
+                project_name="Greenpark Enclave",
+                category="RESIDENTIAL: APARTMENTS",
+                price=12000000,
+                promotion=club,
+                conditions=bloated,
+                confidence=1.0,
+                page=1,
+            )
+        )
+    candidates.append(
+        CandidateProduct(
+            name="Metro Heights",
+            project_name="Metro Heights",
+            category="MORE APARTMENT PROJECTS",
+            price=8200000,
+            conditions=bloated,
+            confidence=1.0,
+            page=1,
+        )
+    )
+    records = validate_products(candidates)
+    promo_warned = [
+        r for r in records if "Promotion may be over-applied across sections" in r.warnings
+    ]
+    cond_warned = [
+        r
+        for r in records
+        if "Conditions may be over-applied from a single section" in r.warnings
+    ]
+    assert len(promo_warned) >= 6  # club on 7 of 8 items across projects
+    assert len(cond_warned) == len(records)
+    assert all(r.confidence is not None and r.confidence <= 0.8 for r in cond_warned)

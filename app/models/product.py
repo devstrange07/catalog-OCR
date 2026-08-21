@@ -104,6 +104,8 @@ class CandidateProduct(BaseModel):
     product_code: str | None = None
     item_type: ItemType | str | None = None
     category: str | None = None
+    project_name: str | None = None
+    location: str | None = None
 
     price: float | str | None = None
     list_price: float | str | None = None
@@ -142,6 +144,8 @@ class ProductRecord(BaseModel):
     product_code: str | None = None
     item_type: ItemType = ItemType.product
     category: str | None = None
+    project_name: str | None = None
+    location: str | None = None
 
     price: float | None = None
     list_price: float | None = None

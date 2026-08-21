@@ -44,23 +44,58 @@ _DISCOUNT_SCHEMA: dict[str, Any] = {
 _PROMOTION_SCHEMA: dict[str, Any] = {
     "type": "OBJECT",
     "nullable": True,
+    "description": (
+        "Active offer scoped to THIS item's section only "
+        "(BOGO, trial, happy_hour, flash_sale, volume_rebate, etc.)"
+    ),
     "properties": {
-        "type": {"type": "STRING", "nullable": True},
-        "label": {"type": "STRING", "nullable": True},
-        "details": {"type": "STRING", "nullable": True},
-        "conditions": {"type": "STRING", "nullable": True},
+        "type": {
+            "type": "STRING",
+            "nullable": True,
+            "description": "Offer type: BOGO, trial, happy_hour, flash_sale, other, etc.",
+        },
+        "label": {
+            "type": "STRING",
+            "nullable": True,
+            "description": "Short promo label as printed",
+        },
+        "details": {
+            "type": "STRING",
+            "nullable": True,
+            "description": "Extra promo detail (e.g. on 3BHK+)",
+        },
+        "conditions": {
+            "type": "STRING",
+            "nullable": True,
+            "description": "Promo-specific conditions as printed",
+        },
     },
 }
 
 _PRICE_TIER_SCHEMA: dict[str, Any] = {
     "type": "OBJECT",
     "properties": {
-        "label": {"type": "STRING"},
-        "price": {"type": "STRING", "nullable": True},
+        "label": {
+            "type": "STRING",
+            "description": "Tier label: EMI, per sqft, list, sale, monthly, annual, etc.",
+        },
+        "price": {
+            "type": "STRING",
+            "nullable": True,
+            "description": "Numeric price for this tier. Leave null if non-numeric.",
+        },
         "details": {"type": "STRING", "nullable": True},
-        "is_current": {"type": "BOOLEAN", "nullable": True},
+        "is_current": {
+            "type": "BOOLEAN",
+            "nullable": True,
+            "description": "False for struck-through / superseded / was prices",
+        },
         "currency": {"type": "STRING", "nullable": True},
-        "billing_cycle": {"type": "STRING", "nullable": True},
+        "billing_cycle": {
+            "type": "STRING",
+            "nullable": True,
+            "description": "monthly, annual, one_time — if this tier has its own cycle",
+        },
     },
     "required": ["label"],
 }
@@ -68,16 +103,34 @@ _PRICE_TIER_SCHEMA: dict[str, Any] = {
 _VARIANT_SCHEMA: dict[str, Any] = {
     "type": "OBJECT",
     "properties": {
-        "attribute": {"type": "STRING"},
-        "label": {"type": "STRING"},
-        "price": {"type": "STRING", "nullable": True},
+        "attribute": {
+            "type": "STRING",
+            "description": "Dimension: Size, Plan, Color, Portion, Room Type, etc.",
+        },
+        "label": {
+            "type": "STRING",
+            "description": "Value: 500ml, Pro, Red, Half, Private, etc.",
+        },
+        "price": {
+            "type": "STRING",
+            "nullable": True,
+            "description": "Numeric price. Leave null if non-numeric; use available instead.",
+        },
         "currency": {"type": "STRING", "nullable": True},
         "unit": {"type": "STRING", "nullable": True},
         "pack_size": {"type": "STRING", "nullable": True},
         "sku": {"type": "STRING", "nullable": True},
         "description": {"type": "STRING", "nullable": True},
-        "available": {"type": "STRING", "nullable": True},
-        "is_default": {"type": "BOOLEAN", "nullable": True},
+        "available": {
+            "type": "STRING",
+            "nullable": True,
+            "description": "Non-numeric availability (free, included, on_request) when price is null",
+        },
+        "is_default": {
+            "type": "BOOLEAN",
+            "nullable": True,
+            "description": "True for exactly one variant per product whose price mirrors top-level price",
+        },
     },
     "required": ["attribute", "label"],
 }
@@ -90,52 +143,167 @@ PRODUCTS_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "OBJECT",
                 "properties": {
-                    "name": {"type": "STRING"},
+                    "name": {
+                        "type": "STRING",
+                        "description": "Item name as printed",
+                    },
                     "brand": {"type": "STRING", "nullable": True},
                     "sku": {"type": "STRING", "nullable": True},
                     "product_code": {"type": "STRING", "nullable": True},
-                    "item_type": {"type": "STRING", "nullable": True},
-                    "category": {"type": "STRING", "nullable": True},
-                    "price": {"type": "STRING", "nullable": True},
-                    "list_price": {"type": "STRING", "nullable": True},
-                    "currency": {"type": "STRING", "nullable": True},
-                    "price_qualifier": {"type": "STRING", "nullable": True},
-                    "billing_cycle": {"type": "STRING", "nullable": True},
+                    "item_type": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": (
+                            "product | service | bundle | plan | event | "
+                            "addon | listing | announcement | other"
+                        ),
+                    },
+                    "category": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": "Document section heading",
+                    },
+                    "project_name": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": (
+                            "Sub-section project / listing group "
+                            "(e.g. Skyline Vistas)"
+                        ),
+                    },
+                    "location": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": (
+                            "Locality / city when printed "
+                            "(e.g. Whitefield, Bangalore)"
+                        ),
+                    },
+                    "price": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": (
+                            "Current effective / selling price as printed "
+                            "(numeric string in document currency)"
+                        ),
+                    },
+                    "list_price": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": (
+                            "Reference/original/recommended price "
+                            "(MSRP, MRP, RRP, rack rate, standard price)"
+                        ),
+                    },
+                    "currency": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": "ISO currency code preferred (INR, USD, EUR) or symbol",
+                    },
+                    "price_qualifier": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": "from | up_to | approx | negotiable | on_request | null=exact",
+                    },
+                    "billing_cycle": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": "one_time | monthly | annual | per_use | per_session",
+                    },
                     "discount": _DISCOUNT_SCHEMA,
-                    "unit": {"type": "STRING", "nullable": True},
-                    "pack_size": {"type": "STRING", "nullable": True},
-                    "quantity": {"type": "INTEGER", "nullable": True},
+                    "unit": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": "Pricing basis: pc, kg, hour, seat, sqft, session",
+                    },
+                    "pack_size": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": "Measure of one item (1080 sqft, 500g, 60 min) — not a count",
+                    },
+                    "quantity": {
+                        "type": "INTEGER",
+                        "nullable": True,
+                        "description": "Count of items (6 cones, 10 cups)",
+                    },
                     "promotion": _PROMOTION_SCHEMA,
-                    "validity": {"type": "STRING", "nullable": True},
+                    "validity": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": "Time-bound constraints as printed",
+                    },
                     "includes": {
                         "type": "ARRAY",
                         "nullable": True,
                         "items": {"type": "STRING"},
+                        "description": "Bundle contents / plan features / package components",
                     },
-                    "description": {"type": "STRING", "nullable": True},
+                    "description": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": "Actual item description only — not promo text or conditions",
+                    },
                     "conditions": {
                         "type": "ARRAY",
                         "nullable": True,
                         "items": {"type": "STRING"},
+                        "description": (
+                            "Item-level terms and fine print scoped to THIS item's section only"
+                        ),
                     },
-                    "minimum_order": {"type": "STRING", "nullable": True},
+                    "minimum_order": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": "MOQ / minimum spend / minimum pax as printed",
+                    },
                     "tags": {
                         "type": "ARRAY",
                         "nullable": True,
                         "items": {"type": "STRING"},
+                        "description": "Open labels: new, vegetarian, bestseller, RoHS, etc.",
                     },
-                    "availability": {"type": "STRING", "nullable": True},
-                    "page": {"type": "INTEGER", "nullable": True},
-                    "source_snippet": {"type": "STRING", "nullable": True},
-                    "confidence": {"type": "NUMBER", "nullable": True},
+                    "availability": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": (
+                            "available | out_of_stock | pre_order | coming_soon | "
+                            "discontinued | on_request | waitlist | limited | unknown"
+                        ),
+                    },
+                    "page": {
+                        "type": "INTEGER",
+                        "nullable": True,
+                        "description": (
+                            "Document page number as printed (e.g. from 'Page 2 of 8'), "
+                            "not parser index"
+                        ),
+                    },
+                    "source_snippet": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "description": "Short quote from source text (max 120 chars)",
+                    },
+                    "confidence": {
+                        "type": "NUMBER",
+                        "nullable": True,
+                        "description": "0-1 how clearly the source supports this item",
+                    },
                     "price_tiers": {
                         "type": "ARRAY",
                         "nullable": True,
+                        "description": (
+                            "Different price points for the SAME item config "
+                            "(EMI, per-sqft, was/now, monthly vs annual)"
+                        ),
                         "items": _PRICE_TIER_SCHEMA,
                     },
                     "variants": {
                         "type": "ARRAY",
                         "nullable": True,
+                        "description": (
+                            "Genuinely different configurations "
+                            "(size, color, plan, portion, room type)"
+                        ),
                         "items": _VARIANT_SCHEMA,
                     },
                 },
@@ -179,6 +347,10 @@ def _call_gemini_structured(markdown_text: str, *, chunk_label: str) -> list[Can
     user_content = (
         f"Extract all products from the following parsed document markdown ({chunk_label}).\n"
         f"Return JSON with a 'products' array.\n\n"
+        f"IMPORTANT: Promotions and conditions belong ONLY to items in the same "
+        f"section/table where the text appears. Do not broadcast them across "
+        f"different project headings. Use price_tiers for secondary prices "
+        f"(EMI, per-sqft rates).\n\n"
         f"{markdown_text}"
     )
 

@@ -111,3 +111,55 @@ def test_extract_deduplicates_candidates(monkeypatch):
 
     # Both chunks return same product on page 1 — dedupe merges them
     assert len(result) == 1
+
+
+def test_gemini_schema_has_field_descriptions():
+    from app.stages.extract_gemini import PRODUCTS_RESPONSE_SCHEMA
+
+    props = PRODUCTS_RESPONSE_SCHEMA["properties"]["products"]["items"]["properties"]
+    assert "description" in props["price"]
+    assert "description" in props["conditions"]
+    assert "description" in props["pack_size"]
+    assert "description" in props["unit"]
+    assert "description" in props["page"]
+    assert "description" in props["price_tiers"]
+    assert "project_name" in props
+    assert "location" in props
+    assert "section only" in props["conditions"]["description"].lower()
+
+
+def test_gemini_user_message_includes_scope_reminder(monkeypatch):
+    from app.stages import extract_gemini as mod
+
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    monkeypatch.setattr(settings, "gemini_model", "gemini-2.5-flash")
+
+    products_payload = [{"name": "Widget", "price": "1"}]
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.json.return_value = _gemini_response(products_payload)
+
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.__enter__ = lambda s: mock_client
+        mock_client.__exit__ = lambda s, *a: None
+        mock_client.post.return_value = fake_resp
+        mock_client_cls.return_value = mock_client
+
+        mod.extract_products_gemini(_make_parsed("Widget $1"))
+
+        call_kwargs = mock_client.post.call_args
+        payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+        user_text = payload["contents"][0]["parts"][0]["text"]
+        assert "Promotions and conditions belong ONLY" in user_text
+        assert "price_tiers" in user_text
+
+
+def test_system_prompt_has_scope_and_page_rules():
+    from app.stages.extract import SYSTEM_PROMPT
+
+    assert "Scope & locality" in SYSTEM_PROMPT
+    assert "Never broadcast a promotion" in SYSTEM_PROMPT
+    assert "Page 2 of 8" in SYSTEM_PROMPT
+    assert 'label="EMI"' in SYSTEM_PROMPT
+    assert "project_name" in SYSTEM_PROMPT

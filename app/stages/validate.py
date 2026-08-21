@@ -415,6 +415,8 @@ def _validate_one(
         product_code=(candidate.product_code or None),
         item_type=item_type,
         category=(candidate.category or None),
+        project_name=(candidate.project_name or None),
+        location=(candidate.location or None),
         price=price,
         list_price=list_price,
         currency=currency,
@@ -454,6 +456,83 @@ def _flag_duplicates(records: list[ProductRecord]) -> None:
                 records[i].warnings.append("Possible duplicate product in document")
 
 
+def _scope_bucket(record: ProductRecord) -> str:
+    """Section identity used to detect cross-scope attribute bleed."""
+    project = (record.project_name or "").strip().lower()
+    category = (record.category or "").strip().lower()
+    return f"{project}|{category}"
+
+
+def _promotion_key(record: ProductRecord) -> str | None:
+    promo = record.promotion
+    if promo is None:
+        return None
+    parts = [
+        (promo.type or "").strip().lower(),
+        (promo.label or "").strip().lower(),
+        (promo.details or "").strip().lower(),
+        (promo.conditions or "").strip().lower(),
+    ]
+    key = "|".join(parts)
+    return key if any(parts) else None
+
+
+def _conditions_key(record: ProductRecord) -> str | None:
+    if not record.conditions:
+        return None
+    normalized = sorted(c.strip().lower() for c in record.conditions if c and c.strip())
+    return "||".join(normalized) if normalized else None
+
+
+def _downgrade_confidence(record: ProductRecord, delta: float = 0.2) -> None:
+    if record.confidence is None:
+        return
+    record.confidence = max(record.confidence - delta, 0.5)
+
+
+def _flag_uniform_attribute_bleed(
+    records: list[ProductRecord],
+    *,
+    attr_key_fn,
+    warning: str,
+) -> None:
+    """Warn when the same attribute value spans >50% of items across distinct scopes."""
+    total = len(records)
+    if total < 2:
+        return
+
+    groups: dict[str, list[int]] = defaultdict(list)
+    for i, rec in enumerate(records):
+        key = attr_key_fn(rec)
+        if key:
+            groups[key].append(i)
+
+    for idxs in groups.values():
+        if len(idxs) / total <= 0.5:
+            continue
+        scopes = {_scope_bucket(records[i]) for i in idxs}
+        if len(scopes) < 2:
+            continue
+        for i in idxs:
+            if warning not in records[i].warnings:
+                records[i].warnings.append(warning)
+            _downgrade_confidence(records[i])
+
+
+def _flag_scope_anomalies(records: list[ProductRecord]) -> None:
+    """Soft checks for promotion/conditions broadcast across sections."""
+    _flag_uniform_attribute_bleed(
+        records,
+        attr_key_fn=_promotion_key,
+        warning="Promotion may be over-applied across sections",
+    )
+    _flag_uniform_attribute_bleed(
+        records,
+        attr_key_fn=_conditions_key,
+        warning="Conditions may be over-applied from a single section",
+    )
+
+
 def validate_products(
     candidates: list[CandidateProduct],
     parsed: ParsedDocument | None = None,
@@ -478,6 +557,7 @@ def validate_products(
             page_blocks[page.page_number] = list(page.blocks)
     records = [_validate_one(c, page_blocks=page_blocks) for c in candidates]
     _flag_duplicates(records)
+    _flag_scope_anomalies(records)
     validated = sum(1 for r in records if r.status == ProductStatus.validated)
     rejected = sum(1 for r in records if r.status == ProductStatus.rejected)
     _notify(

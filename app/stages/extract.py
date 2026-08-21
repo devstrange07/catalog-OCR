@@ -133,6 +133,20 @@ SUBMIT_PRODUCTS_TOOL: dict[str, Any] = {
                                 "type": ["string", "null"],
                                 "description": "Document section heading",
                             },
+                            "project_name": {
+                                "type": ["string", "null"],
+                                "description": (
+                                    "Sub-section project / listing group "
+                                    "(e.g. Skyline Vistas)"
+                                ),
+                            },
+                            "location": {
+                                "type": ["string", "null"],
+                                "description": (
+                                    "Locality / city when printed "
+                                    "(e.g. Whitefield, Bangalore)"
+                                ),
+                            },
                             "price": {
                                 "type": ["number", "string", "null"],
                                 "description": "Current effective / selling price",
@@ -250,16 +264,19 @@ Rules:
 - Identify distinct items (name, optional brand/sku/price/unit/description). Works for physical goods, services, plans, bundles, events, listings, and announcements.
 - For multi-item pages, return every distinct item you can support with evidence.
 - Set source_snippet to a short quote from the text (max ~120 characters); keep description brief and reserved for actual item description — not promo slogans, not conditions, not validity.
-- Set page when known from headers like "--- Page N ---".
+- Set page to the document's own printed page number when visible (e.g. "Page 2 of 8"). Fall back to the parser header "--- Page N ---" only if no printed page number exists.
 - Set confidence (0-1) based on how clearly the source supports the extracted fields.
 - Set item_type when clear: product, service, bundle, plan, event, addon, listing, announcement, other.
 - Set category to the document section heading when present (e.g. "Starters", "Team Plans", "Fasteners").
+- Set project_name to the sub-section project / listing group when present (e.g. "Skyline Vistas"); set location to locality/city when present (e.g. "Whitefield, Bangalore").
 - Pricing:
   - price = current effective / selling price.
   - list_price = reference/original/recommended price when printed separately (MSRP, MRP, RRP, rack rate, standard price).
   - price_qualifier = from | up_to | approx | negotiable | on_request when the printed price is not exact; leave null when exact.
   - billing_cycle = one_time | monthly | annual | per_use | per_session when recurring or usage-based.
   - discount = structured {amount, percent, description} when savings are printed.
+  - When a table has multiple price columns (e.g. total price + EMI + price-per-sqft), capture the primary sale price in `price` and encode secondary amounts as price_tiers entries (label="EMI", label="per sqft").
+  - Section-header psf rates (e.g. "₹9,500/sqft") should appear as a price_tier on each item in that section, or be used to set `unit` = "sqft" if it is the sole pricing basis.
 - Sizing:
   - unit = pricing basis (pc, kg, hour, seat, sqft, session).
   - pack_size = measure of one item (100ml, 500g, 60 min) — not a count.
@@ -275,6 +292,11 @@ Rules:
 - minimum_order: MOQ / minimum spend / minimum pax as printed.
 - tags: open labels (new, vegetarian, bestseller, RoHS_compliant, most_popular).
 - availability: available | out_of_stock | pre_order | coming_soon | discontinued | on_request | waitlist | limited | unknown. Use coming_soon / announcement for "price list TBA" style items.
+- Scope & locality:
+  - promotion, conditions, and description belong ONLY to items in the same section/box/table where the text appears. Never broadcast a promotion or condition across different project headings.
+  - If a section heading names a project/location (e.g. "SKYLINE VISTAS, WHITEFIELD"), items under it share that context — but items under a DIFFERENT heading do not.
+  - Page-wide legal lines (GST, stamp duty, RERA) that appear in a page header/footer may apply to all items. Section-specific terms (possession date, booking %, bank tie-ups) apply only to items in that section.
+  - When in doubt, leave promotion/conditions null rather than guessing scope.
 - Prefer ISO currency codes (INR, USD, EUR) when known; symbols like ₹/$/€ are acceptable.
 - If no products are present, call submit_products with an empty products array.
 - You MUST call the submit_products tool. Do not answer with free-form JSON or prose as the product list.
