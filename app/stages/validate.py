@@ -10,11 +10,39 @@ import re
 from collections import defaultdict
 
 from app.models.document import ParsedDocument, TextBlock
-from app.models.product import CandidateProduct, ProductRecord, ProductStatus
+from app.models.product import (
+    Availability,
+    CandidateProduct,
+    Discount,
+    ItemType,
+    PriceTier,
+    ProductRecord,
+    ProductStatus,
+    Promotion,
+    Variant,
+)
 
 _CURRENCY_RE = re.compile(r"^[A-Za-z]{3}$")
 _PRICE_CLEAN_RE = re.compile(r"[^\d.\-]")
 _PRICE_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?")
+
+_SYMBOL_TO_ISO: dict[str, str] = {
+    "₹": "INR",
+    "$": "USD",
+    "€": "EUR",
+    "£": "GBP",
+    "¥": "JPY",
+    "₩": "KRW",
+    "฿": "THB",
+    "R$": "BRL",
+    "zł": "PLN",
+    "RM": "MYR",
+    "S$": "SGD",
+    "HK$": "HKD",
+    "A$": "AUD",
+    "C$": "CAD",
+    "NZ$": "NZD",
+}
 
 _VARIANT_PRICE_SENTINELS = {
     "free",
@@ -24,8 +52,12 @@ _VARIANT_PRICE_SENTINELS = {
     "na",
     "tbd",
     "on request",
+    "on_request",
     "-",
 }
+
+_ITEM_TYPE_VALUES = {e.value for e in ItemType}
+_AVAILABILITY_VALUES = {e.value for e in Availability}
 
 
 def _normalize_price(value: float | str | None) -> tuple[float | None, list[str]]:
@@ -50,11 +82,16 @@ def _normalize_currency(value: str | None) -> tuple[str | None, list[str]]:
     warnings: list[str] = []
     if value is None or not str(value).strip():
         return None, warnings
-    code = str(value).strip().upper()
-    if not _CURRENCY_RE.match(code):
-        warnings.append(f"Currency not ISO-like: {value!r}")
-        return code[:8], warnings
-    return code, warnings
+    raw = str(value).strip()
+    # Prefer longer multi-char symbols first (R$, HK$, etc.)
+    for symbol, iso in sorted(_SYMBOL_TO_ISO.items(), key=lambda kv: -len(kv[0])):
+        if raw == symbol or raw.startswith(symbol):
+            return iso, warnings
+    code = raw.upper()
+    if _CURRENCY_RE.match(code):
+        return code, warnings
+    warnings.append(f"Currency not ISO-like: {value!r}")
+    return code[:8], warnings
 
 
 def _normalize_variant_price(
@@ -78,35 +115,162 @@ def _normalize_variant_price(
         return None, None, f"Unparseable variant price: {value!r}"
 
 
-def _normalize_price_variants(candidate: CandidateProduct) -> tuple[list[dict] | None, list[str]]:
-    """Returns (normalized_variants, product_level_errors). Variant price issues become
-    per-variant warnings, never product-level errors."""
-    product_level_errors: list[str] = []
-    if not candidate.price_variants:
-        return None, product_level_errors
+def _normalize_variants(
+    candidate: CandidateProduct,
+) -> tuple[list[Variant] | None, list[str]]:
+    product_level_warnings: list[str] = []
+    if not candidate.variants:
+        return None, product_level_warnings
 
-    normalized: list[dict] = []
-    for variant in candidate.price_variants:
+    normalized: list[Variant] = []
+    for variant in candidate.variants:
         price, available, warning = _normalize_variant_price(variant.price)
         variant_warnings = list(variant.warnings)
         if warning:
             variant_warnings.append(warning)
+            product_level_warnings.append(warning)
+        currency, curr_warnings = _normalize_currency(variant.currency)
+        variant_warnings.extend(curr_warnings)
+        product_level_warnings.extend(curr_warnings)
+        attribute = (variant.attribute or "").strip() or "Option"
+        label = (variant.label or "").strip() or "Unnamed"
         normalized.append(
-            {
-                "label": variant.label,
-                "price": price,
-                "details": (variant.details or "").strip() or None,
-                "attribute_name": variant.attribute_name,
-                "sku": variant.sku,
-                "currency": variant.currency,
-                "unit": variant.unit,
-                "pack_size": variant.pack_size,
-                "available": available if available is not None else variant.available,
-                "is_default": variant.is_default,
-                "warnings": variant_warnings,
-            }
+            Variant(
+                attribute=attribute,
+                label=label,
+                price=price,
+                currency=currency,
+                unit=(variant.unit or None),
+                pack_size=(variant.pack_size or None),
+                sku=(variant.sku or None),
+                description=(variant.description or "").strip() or None,
+                available=available if available is not None else variant.available,
+                is_default=bool(variant.is_default),
+                warnings=variant_warnings,
+            )
         )
-    return normalized, product_level_errors
+    return normalized, product_level_warnings
+
+
+def _normalize_price_tiers(
+    candidate: CandidateProduct,
+) -> tuple[list[PriceTier] | None, list[str]]:
+    product_level_warnings: list[str] = []
+    if not candidate.price_tiers:
+        return None, product_level_warnings
+
+    normalized: list[PriceTier] = []
+    for tier in candidate.price_tiers:
+        price, _available, warning = _normalize_variant_price(tier.price)
+        tier_warnings = list(tier.warnings)
+        if warning:
+            # Rephrase for tiers (same underlying parser)
+            warning = warning.replace("variant price", "tier price")
+            tier_warnings.append(warning)
+            product_level_warnings.append(warning)
+        currency, curr_warnings = _normalize_currency(tier.currency)
+        tier_warnings.extend(curr_warnings)
+        product_level_warnings.extend(curr_warnings)
+        label = (tier.label or "").strip() or "Unnamed"
+        normalized.append(
+            PriceTier(
+                label=label,
+                price=price,
+                details=(tier.details or "").strip() or None,
+                is_current=True if tier.is_current is None else bool(tier.is_current),
+                currency=currency,
+                billing_cycle=(tier.billing_cycle or None),
+                warnings=tier_warnings,
+            )
+        )
+    return normalized, product_level_warnings
+
+
+def _normalize_discount(discount: Discount | None) -> Discount | None:
+    if discount is None:
+        return None
+    amount = discount.amount
+    percent = discount.percent
+    description = (discount.description or "").strip() or None
+    if amount is None and percent is None and description is None:
+        return None
+    return Discount(amount=amount, percent=percent, description=description)
+
+
+def _normalize_promotion(promotion: Promotion | None) -> Promotion | None:
+    if promotion is None:
+        return None
+    type_ = (promotion.type or "").strip() or None
+    label = (promotion.label or "").strip() or None
+    details = (promotion.details or "").strip() or None
+    conditions = (promotion.conditions or "").strip() or None
+    if not any([type_, label, details, conditions]):
+        return None
+    return Promotion(type=type_, label=label, details=details, conditions=conditions)
+
+
+def _normalize_item_type(value: ItemType | str | None) -> tuple[ItemType, list[str]]:
+    warnings: list[str] = []
+    if value is None or value == "":
+        return ItemType.product, warnings
+    if isinstance(value, ItemType):
+        return value, warnings
+    text = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    # Common aliases
+    aliases = {
+        "combo": ItemType.bundle,
+        "package": ItemType.bundle,
+        "deal": ItemType.product,
+        "offer": ItemType.product,
+        "subscription": ItemType.plan,
+        "membership": ItemType.plan,
+        "ticket": ItemType.event,
+        "extra": ItemType.addon,
+        "add_on": ItemType.addon,
+    }
+    if text in aliases:
+        return aliases[text], warnings
+    if text in _ITEM_TYPE_VALUES:
+        return ItemType(text), warnings
+    warnings.append(f"Unknown item_type {value!r}; defaulting to 'other'")
+    return ItemType.other, warnings
+
+
+def _normalize_availability(
+    value: Availability | str | None,
+) -> tuple[Availability, list[str]]:
+    warnings: list[str] = []
+    if value is None or value == "":
+        return Availability.available, warnings
+    if isinstance(value, Availability):
+        return value, warnings
+    text = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "instock": Availability.available,
+        "in_stock": Availability.available,
+        "sold_out": Availability.out_of_stock,
+        "outofstock": Availability.out_of_stock,
+        "backorder": Availability.pre_order,
+        "contact": Availability.on_request,
+        "contact_sales": Availability.on_request,
+        "call_for_pricing": Availability.on_request,
+        "tba": Availability.coming_soon,
+        "limited_stock": Availability.limited,
+        "while_supplies_last": Availability.limited,
+    }
+    if text in aliases:
+        return aliases[text], warnings
+    if text in _AVAILABILITY_VALUES:
+        return Availability(text), warnings
+    warnings.append(f"Unknown availability {value!r}; defaulting to 'unknown'")
+    return Availability.unknown, warnings
+
+
+def _clean_str_list(values: list[str] | None) -> list[str] | None:
+    if not values:
+        return None
+    cleaned = [str(v).strip() for v in values if str(v).strip()]
+    return cleaned or None
 
 
 def _best_name_block(blocks: list[TextBlock], name: str) -> TextBlock | None:
@@ -160,14 +324,25 @@ def _flag_spatial_mismatch(
                 "Spatial check: name and price token are not on the same OCR row (possible row-shift)"
             )
 
-    for variant in candidate.price_variants or []:
+    for variant in candidate.variants or []:
         variant_block = _best_price_block(blocks, variant.price)
         if not variant_block or variant_block.row_id is None:
             continue
         if name_block.row_id != variant_block.row_id:
-            label = variant.attribute_name or variant.label or "variant"
+            label = variant.label or variant.attribute or "variant"
             warnings.append(
                 f"Spatial check: variant '{label}' price token is not on the same OCR row "
+                "as name (possible row-shift)"
+            )
+
+    for tier in candidate.price_tiers or []:
+        tier_block = _best_price_block(blocks, tier.price)
+        if not tier_block or tier_block.row_id is None:
+            continue
+        if name_block.row_id != tier_block.row_id:
+            label = tier.label or "tier"
+            warnings.append(
+                f"Spatial check: price tier '{label}' price token is not on the same OCR row "
                 "as name (possible row-shift)"
             )
 
@@ -185,13 +360,26 @@ def _validate_one(
 
     price, price_errors = _normalize_price(candidate.price)
     errors.extend(price_errors)
-    price_variants, variant_errors = _normalize_price_variants(candidate)
-    errors.extend(variant_errors)
-    for variant in price_variants or []:
-        warnings.extend(variant.get("warnings", []))
+    list_price, list_price_errors = _normalize_price(candidate.list_price)
+    # list_price parse issues are warnings, not rejection
+    for err in list_price_errors:
+        warnings.append(err.replace("Unparseable price", "Unparseable list_price"))
+
+    variants, variant_warnings = _normalize_variants(candidate)
+    warnings.extend(variant_warnings)
+    price_tiers, tier_warnings = _normalize_price_tiers(candidate)
+    warnings.extend(tier_warnings)
 
     currency, currency_warnings = _normalize_currency(candidate.currency)
     warnings.extend(currency_warnings)
+
+    item_type, item_type_warnings = _normalize_item_type(candidate.item_type)
+    warnings.extend(item_type_warnings)
+    availability, availability_warnings = _normalize_availability(candidate.availability)
+    warnings.extend(availability_warnings)
+
+    discount = _normalize_discount(candidate.discount)
+    promotion = _normalize_promotion(candidate.promotion)
 
     confidence = candidate.confidence
     if confidence is not None and not (0.0 <= confidence <= 1.0):
@@ -208,8 +396,12 @@ def _validate_one(
             candidate.sku,
             candidate.product_code,
             candidate.price,
+            candidate.list_price,
             candidate.description,
-            candidate.price_variants,
+            candidate.variants,
+            candidate.price_tiers,
+            candidate.includes,
+            candidate.promotion,
         ]
     ):
         errors.append("Empty product shell")
@@ -221,15 +413,30 @@ def _validate_one(
         brand=(candidate.brand or None),
         sku=(candidate.sku or None),
         product_code=(candidate.product_code or None),
+        item_type=item_type,
+        category=(candidate.category or None),
         price=price,
+        list_price=list_price,
         currency=currency,
+        price_qualifier=(candidate.price_qualifier or None),
+        billing_cycle=(candidate.billing_cycle or None),
+        discount=discount,
         unit=(candidate.unit or None),
         pack_size=(candidate.pack_size or None),
+        quantity=candidate.quantity,
+        promotion=promotion,
+        validity=(candidate.validity or None),
+        includes=_clean_str_list(candidate.includes),
         description=(candidate.description or None),
+        conditions=_clean_str_list(candidate.conditions),
+        minimum_order=(candidate.minimum_order or None),
+        tags=_clean_str_list(candidate.tags),
+        availability=availability,
         page=candidate.page,
         source_snippet=(candidate.source_snippet or None),
         confidence=confidence,
-        price_variants=price_variants,
+        price_tiers=price_tiers,
+        variants=variants,
         status=status,
         validation_errors=errors,
         warnings=warnings,

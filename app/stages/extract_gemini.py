@@ -31,6 +31,57 @@ _GEMINI_SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
     "- Return a JSON object with a single key 'products' containing your product array.",
 )
 
+_DISCOUNT_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "nullable": True,
+    "properties": {
+        "amount": {"type": "NUMBER", "nullable": True},
+        "percent": {"type": "NUMBER", "nullable": True},
+        "description": {"type": "STRING", "nullable": True},
+    },
+}
+
+_PROMOTION_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "nullable": True,
+    "properties": {
+        "type": {"type": "STRING", "nullable": True},
+        "label": {"type": "STRING", "nullable": True},
+        "details": {"type": "STRING", "nullable": True},
+        "conditions": {"type": "STRING", "nullable": True},
+    },
+}
+
+_PRICE_TIER_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "label": {"type": "STRING"},
+        "price": {"type": "STRING", "nullable": True},
+        "details": {"type": "STRING", "nullable": True},
+        "is_current": {"type": "BOOLEAN", "nullable": True},
+        "currency": {"type": "STRING", "nullable": True},
+        "billing_cycle": {"type": "STRING", "nullable": True},
+    },
+    "required": ["label"],
+}
+
+_VARIANT_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "attribute": {"type": "STRING"},
+        "label": {"type": "STRING"},
+        "price": {"type": "STRING", "nullable": True},
+        "currency": {"type": "STRING", "nullable": True},
+        "unit": {"type": "STRING", "nullable": True},
+        "pack_size": {"type": "STRING", "nullable": True},
+        "sku": {"type": "STRING", "nullable": True},
+        "description": {"type": "STRING", "nullable": True},
+        "available": {"type": "STRING", "nullable": True},
+        "is_default": {"type": "BOOLEAN", "nullable": True},
+    },
+    "required": ["attribute", "label"],
+}
+
 PRODUCTS_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "OBJECT",
     "properties": {
@@ -43,32 +94,49 @@ PRODUCTS_RESPONSE_SCHEMA: dict[str, Any] = {
                     "brand": {"type": "STRING", "nullable": True},
                     "sku": {"type": "STRING", "nullable": True},
                     "product_code": {"type": "STRING", "nullable": True},
+                    "item_type": {"type": "STRING", "nullable": True},
+                    "category": {"type": "STRING", "nullable": True},
                     "price": {"type": "STRING", "nullable": True},
+                    "list_price": {"type": "STRING", "nullable": True},
                     "currency": {"type": "STRING", "nullable": True},
+                    "price_qualifier": {"type": "STRING", "nullable": True},
+                    "billing_cycle": {"type": "STRING", "nullable": True},
+                    "discount": _DISCOUNT_SCHEMA,
                     "unit": {"type": "STRING", "nullable": True},
                     "pack_size": {"type": "STRING", "nullable": True},
+                    "quantity": {"type": "INTEGER", "nullable": True},
+                    "promotion": _PROMOTION_SCHEMA,
+                    "validity": {"type": "STRING", "nullable": True},
+                    "includes": {
+                        "type": "ARRAY",
+                        "nullable": True,
+                        "items": {"type": "STRING"},
+                    },
                     "description": {"type": "STRING", "nullable": True},
+                    "conditions": {
+                        "type": "ARRAY",
+                        "nullable": True,
+                        "items": {"type": "STRING"},
+                    },
+                    "minimum_order": {"type": "STRING", "nullable": True},
+                    "tags": {
+                        "type": "ARRAY",
+                        "nullable": True,
+                        "items": {"type": "STRING"},
+                    },
+                    "availability": {"type": "STRING", "nullable": True},
                     "page": {"type": "INTEGER", "nullable": True},
                     "source_snippet": {"type": "STRING", "nullable": True},
                     "confidence": {"type": "NUMBER", "nullable": True},
-                    "price_variants": {
+                    "price_tiers": {
                         "type": "ARRAY",
                         "nullable": True,
-                        "items": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "attribute_name": {"type": "STRING", "nullable": True},
-                                "label": {"type": "STRING", "nullable": True},
-                                "price": {"type": "STRING", "nullable": True},
-                                "currency": {"type": "STRING", "nullable": True},
-                                "unit": {"type": "STRING", "nullable": True},
-                                "pack_size": {"type": "STRING", "nullable": True},
-                                "sku": {"type": "STRING", "nullable": True},
-                                "available": {"type": "STRING", "nullable": True},
-                                "is_default": {"type": "BOOLEAN", "nullable": True},
-                                "details": {"type": "STRING", "nullable": True},
-                            },
-                        },
+                        "items": _PRICE_TIER_SCHEMA,
+                    },
+                    "variants": {
+                        "type": "ARRAY",
+                        "nullable": True,
+                        "items": _VARIANT_SCHEMA,
                     },
                 },
                 "required": ["name"],

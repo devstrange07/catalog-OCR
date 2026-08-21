@@ -15,20 +15,97 @@ from openai import OpenAI
 
 from app.config import settings
 from app.models.document import ParsedDocument, ParsedPage
-from app.models.product import CandidateProduct, PriceVariant, SubmitProductsArgs
+from app.models.product import CandidateProduct, PriceTier, SubmitProductsArgs, Variant
 
 logger = logging.getLogger(__name__)
 
 TOOL_NAME = "submit_products"
+
+_DISCOUNT_SCHEMA: dict[str, Any] = {
+    "type": ["object", "null"],
+    "properties": {
+        "amount": {"type": ["number", "null"]},
+        "percent": {"type": ["number", "null"]},
+        "description": {"type": ["string", "null"]},
+    },
+    "additionalProperties": False,
+}
+
+_PROMOTION_SCHEMA: dict[str, Any] = {
+    "type": ["object", "null"],
+    "properties": {
+        "type": {"type": ["string", "null"]},
+        "label": {"type": ["string", "null"]},
+        "details": {"type": ["string", "null"]},
+        "conditions": {"type": ["string", "null"]},
+    },
+    "additionalProperties": False,
+}
+
+_PRICE_TIER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string"},
+        "price": {
+            "type": ["number", "string", "null"],
+            "description": "Numeric price for this tier. Leave null if non-numeric.",
+        },
+        "details": {"type": ["string", "null"]},
+        "is_current": {
+            "type": ["boolean", "null"],
+            "description": "False for struck-through / superseded / was prices",
+        },
+        "currency": {"type": ["string", "null"]},
+        "billing_cycle": {
+            "type": ["string", "null"],
+            "description": "monthly, annual, one_time — if this tier has its own cycle",
+        },
+    },
+    "required": ["label"],
+    "additionalProperties": False,
+}
+
+_VARIANT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "attribute": {
+            "type": "string",
+            "description": "Dimension: Size, Plan, Color, Portion, Room Type, etc.",
+        },
+        "label": {
+            "type": "string",
+            "description": "Value: 500ml, Pro, Red, Half, Private, etc.",
+        },
+        "price": {
+            "type": ["number", "string", "null"],
+            "description": "Numeric price. Leave null if non-numeric; use available instead.",
+        },
+        "currency": {"type": ["string", "null"]},
+        "unit": {"type": ["string", "null"]},
+        "pack_size": {"type": ["string", "null"]},
+        "sku": {"type": ["string", "null"]},
+        "description": {"type": ["string", "null"]},
+        "available": {
+            "type": ["string", "boolean", "null"],
+            "description": "Non-numeric availability (free, included, on_request) when price is null",
+        },
+        "is_default": {
+            "type": ["boolean", "null"],
+            "description": "True for exactly one variant per product whose price mirrors top-level price",
+        },
+    },
+    "required": ["attribute", "label"],
+    "additionalProperties": False,
+}
 
 SUBMIT_PRODUCTS_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": TOOL_NAME,
         "description": (
-            "Submit all products found in the catalog/pamphlet. "
-            "Call this tool with a products array. Do not invent products "
-            "that are not supported by the parsed text."
+            "Submit all products/services found in the catalog, menu, rate card, "
+            "pricing page, or pamphlet. Call this tool with a products array. "
+            "Do not invent items that are not supported by the parsed text."
         ),
         "parameters": {
             "type": "object",
@@ -40,24 +117,92 @@ SUBMIT_PRODUCTS_TOOL: dict[str, Any] = {
                         "properties": {
                             "name": {
                                 "type": "string",
-                                "description": "Product name as printed",
+                                "description": "Item name as printed",
                             },
                             "brand": {"type": ["string", "null"]},
                             "sku": {"type": ["string", "null"]},
                             "product_code": {"type": ["string", "null"]},
+                            "item_type": {
+                                "type": ["string", "null"],
+                                "description": (
+                                    "product | service | bundle | plan | event | "
+                                    "addon | listing | announcement | other"
+                                ),
+                            },
+                            "category": {
+                                "type": ["string", "null"],
+                                "description": "Document section heading",
+                            },
                             "price": {
                                 "type": ["number", "string", "null"],
-                                "description": "Numeric price if present",
+                                "description": "Current effective / selling price",
+                            },
+                            "list_price": {
+                                "type": ["number", "string", "null"],
+                                "description": (
+                                    "Reference/original/recommended price "
+                                    "(MSRP, MRP, RRP, rack rate, standard price)"
+                                ),
                             },
                             "currency": {
                                 "type": ["string", "null"],
-                                "description": "ISO-ish currency code e.g. USD, INR, EUR",
+                                "description": "ISO currency code preferred (INR, USD, EUR) or symbol",
                             },
-                            "unit": {"type": ["string", "null"]},
-                            "pack_size": {"type": ["string", "null"]},
+                            "price_qualifier": {
+                                "type": ["string", "null"],
+                                "description": "from | up_to | approx | negotiable | on_request | null=exact",
+                            },
+                            "billing_cycle": {
+                                "type": ["string", "null"],
+                                "description": "one_time | monthly | annual | per_use | per_session",
+                            },
+                            "discount": _DISCOUNT_SCHEMA,
+                            "unit": {
+                                "type": ["string", "null"],
+                                "description": "Pricing basis: pc, kg, hour, seat, sqft, session",
+                            },
+                            "pack_size": {
+                                "type": ["string", "null"],
+                                "description": "Measure of one item: 100ml, 500g, 60 min",
+                            },
+                            "quantity": {
+                                "type": ["integer", "null"],
+                                "description": "Count of items (6 cones, 10 cups)",
+                            },
+                            "promotion": _PROMOTION_SCHEMA,
+                            "validity": {
+                                "type": ["string", "null"],
+                                "description": "Time-bound constraints as printed",
+                            },
+                            "includes": {
+                                "type": ["array", "null"],
+                                "items": {"type": "string"},
+                                "description": "Bundle contents / plan features / package components",
+                            },
                             "description": {
                                 "type": ["string", "null"],
-                                "description": "Brief product description if present",
+                                "description": "Actual item description only — not promo text or conditions",
+                            },
+                            "conditions": {
+                                "type": ["array", "null"],
+                                "items": {"type": "string"},
+                                "description": "Terms, prerequisites, fine print",
+                            },
+                            "minimum_order": {
+                                "type": ["string", "null"],
+                                "description": "MOQ / minimum spend / minimum pax as printed",
+                            },
+                            "tags": {
+                                "type": ["array", "null"],
+                                "items": {"type": "string"},
+                                "description": "Open labels: new, vegetarian, bestseller, RoHS, etc.",
+                            },
+                            "availability": {
+                                "type": ["string", "null"],
+                                "description": (
+                                    "available | out_of_stock | pre_order | coming_soon | "
+                                    "discontinued | on_request | waitlist | limited | unknown"
+                                ),
                             },
                             "page": {"type": ["integer", "null"]},
                             "source_snippet": {
@@ -68,41 +213,23 @@ SUBMIT_PRODUCTS_TOOL: dict[str, Any] = {
                                 "type": ["number", "null"],
                                 "minimum": 0,
                                 "maximum": 1,
+                                "description": "0-1 how clearly the source supports this item",
                             },
-                            "price_variants": {
+                            "price_tiers": {
                                 "type": ["array", "null"],
-                                "description": "Distinct variants of this product/service (price columns, attribute options, tiers, etc.)",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "attribute_name": {
-                                            "type": ["string", "null"],
-                                            "description": "Category the variant differs by, e.g. age group, size, portion, tier, color",
-                                        },
-                                        "label": {"type": ["string", "null"]},
-                                        "price": {
-                                            "type": ["number", "string", "null"],
-                                            "description": "Numeric price for this variant. Leave null if the variant has no numeric price; use available instead.",
-                                        },
-                                        "currency": {"type": ["string", "null"]},
-                                        "unit": {"type": ["string", "null"]},
-                                        "pack_size": {"type": ["string", "null"]},
-                                        "sku": {"type": ["string", "null"]},
-                                        "available": {
-                                            "type": ["string", "boolean", "null"],
-                                            "description": "Non-numeric availability phrase for this variant (e.g. free, included, on request) when price is null",
-                                        },
-                                        "is_default": {
-                                            "type": ["boolean", "null"],
-                                            "description": "True for exactly one variant per product: the one the top-level price/unit should mirror",
-                                        },
-                                        "details": {
-                                            "type": ["string", "null"],
-                                            "description": "Short description/inclusions specific to this variant",
-                                        },
-                                    },
-                                    "additionalProperties": False,
-                                },
+                                "description": (
+                                    "Different price points for the SAME configuration "
+                                    "(list vs sale, monthly vs annual, volume bands)"
+                                ),
+                                "items": _PRICE_TIER_SCHEMA,
+                            },
+                            "variants": {
+                                "type": ["array", "null"],
+                                "description": (
+                                    "Genuinely different configurations "
+                                    "(size, color, plan, portion, room type)"
+                                ),
+                                "items": _VARIANT_SCHEMA,
                             },
                         },
                         "required": ["name"],
@@ -116,36 +243,39 @@ SUBMIT_PRODUCTS_TOOL: dict[str, Any] = {
     },
 }
 
-SYSTEM_PROMPT = """You extract products from catalog and pamphlet text that was already OCR'd and structured.
+SYSTEM_PROMPT = """You extract products and services from catalog, menu, rate-card, pricing-page, and pamphlet text that was already OCR'd and structured.
 
 Rules:
 - Use ONLY the provided parsed document text.
-- Identify distinct products (name, optional brand/sku/price/unit/description).
-- For multi-product pages, return every distinct product you can support with evidence.
-- Set source_snippet to a short quote from the text (max ~120 characters); keep description brief.
+- Identify distinct items (name, optional brand/sku/price/unit/description). Works for physical goods, services, plans, bundles, events, listings, and announcements.
+- For multi-item pages, return every distinct item you can support with evidence.
+- Set source_snippet to a short quote from the text (max ~120 characters); keep description brief and reserved for actual item description — not promo slogans, not conditions, not validity.
 - Set page when known from headers like "--- Page N ---".
-- Populate price_variants whenever a single product/service has more than one
-  distinct option. Classify each case as follows:
-  - Tabular multi-column price layout: one row, several price-bearing columns
-    under distinct headers. Emit one variant per column, in left-to-right
-    order, with attribute_name set to the column-header category and label
-    set to the header text.
-  - Enumerated attribute list with a shared price: options differ only by a
-    named attribute (size, color, pack) with no price difference. Set
-    attribute_name to the attribute category and price to the shared price
-    (or null if not restated per option).
-  - Tiered or plan-based offering described without a table: distinct named
-    tiers/plans, each with its own price or price-equivalent phrase. Treat
-    identically to the tabular case, with attribute_name set to a tier/plan
-    designation.
-  - Non-numeric price phrase for one option (e.g. a free or on-request
-    option): set that variant's price to null and put the literal phrase in
-    available. Never write a non-numeric phrase into price.
-- Mark exactly one variant per product with is_default=true — the option the
-  top-level price/unit fields should mirror. Keep the top-level price equal
-  to that default variant's price for backward compatibility.
-- If a variant has its own description/inclusions text, capture it in
-  price_variants.details and keep it brief (<=120 chars).
+- Set confidence (0-1) based on how clearly the source supports the extracted fields.
+- Set item_type when clear: product, service, bundle, plan, event, addon, listing, announcement, other.
+- Set category to the document section heading when present (e.g. "Starters", "Team Plans", "Fasteners").
+- Pricing:
+  - price = current effective / selling price.
+  - list_price = reference/original/recommended price when printed separately (MSRP, MRP, RRP, rack rate, standard price).
+  - price_qualifier = from | up_to | approx | negotiable | on_request when the printed price is not exact; leave null when exact.
+  - billing_cycle = one_time | monthly | annual | per_use | per_session when recurring or usage-based.
+  - discount = structured {amount, percent, description} when savings are printed.
+- Sizing:
+  - unit = pricing basis (pc, kg, hour, seat, sqft, session).
+  - pack_size = measure of one item (100ml, 500g, 60 min) — not a count.
+  - quantity = integer count of items when printed (6, 10, 1000).
+- price_tiers vs variants (do not conflate):
+  - price_tiers: different prices for the SAME configuration (list vs sale, was/now, monthly vs annual, volume bands, rack vs online). Set is_current=false for struck-through / was / superseded prices.
+  - variants: genuinely different configurations (size, flavor, plan, portion, room type). Set attribute to the dimension and label to the value. Mark exactly one variant per product with is_default=true when variants exist; keep top-level price equal to that default variant's price.
+  - Non-numeric price phrase for one option (free, on request): set that variant's price to null and put the literal phrase in available. Never write a non-numeric phrase into price.
+- promotion: active offer {type, label, details, conditions} — BOGO, trial, happy_hour, flash_sale, volume_rebate, etc.
+- validity: time-bound constraints as printed (today only, lunch 12-3 PM, offer ends Dec 31).
+- includes: list of bundle contents / plan features / package components.
+- conditions: item-level terms and fine print (taxes, prerequisites, non-refundable).
+- minimum_order: MOQ / minimum spend / minimum pax as printed.
+- tags: open labels (new, vegetarian, bestseller, RoHS_compliant, most_popular).
+- availability: available | out_of_stock | pre_order | coming_soon | discontinued | on_request | waitlist | limited | unknown. Use coming_soon / announcement for "price list TBA" style items.
+- Prefer ISO currency codes (INR, USD, EUR) when known; symbols like ₹/$/€ are acceptable.
 - If no products are present, call submit_products with an empty products array.
 - You MUST call the submit_products tool. Do not answer with free-form JSON or prose as the product list.
 """
@@ -206,16 +336,19 @@ def _chunk_pages(pages: list[ParsedPage], pages_per_chunk: int) -> list[list[Par
     return [pages[i : i + pages_per_chunk] for i in range(0, len(pages), pages_per_chunk)]
 
 
-def _variant_match_key(variant: PriceVariant) -> str:
-    return (variant.attribute_name or variant.label or "").strip().lower()
+def _variant_match_key(variant: Variant) -> str:
+    return f"{(variant.attribute or '').strip().lower()}|{(variant.label or '').strip().lower()}"
+
+
+def _tier_match_key(tier: PriceTier) -> str:
+    return (tier.label or "").strip().lower()
 
 
 def _merge_variants(
-    base: list[PriceVariant] | None, incoming: list[PriceVariant] | None
-) -> list[PriceVariant] | None:
-    """Unions two variant lists, matching on (attribute_name or label). On a
-    match, keeps whichever side already has a non-null price; unmatched
-    incoming variants are appended."""
+    base: list[Variant] | None, incoming: list[Variant] | None
+) -> list[Variant] | None:
+    """Union two variant lists, matching on (attribute, label). On a match, keep
+    whichever side already has a non-null price; unmatched incoming are appended."""
     if not incoming:
         return base
     if not base:
@@ -238,10 +371,34 @@ def _merge_variants(
     return merged
 
 
+def _merge_price_tiers(
+    base: list[PriceTier] | None, incoming: list[PriceTier] | None
+) -> list[PriceTier] | None:
+    if not incoming:
+        return base
+    if not base:
+        return list(incoming)
+
+    merged = list(base)
+    index_by_key = {
+        _tier_match_key(t): i for i, t in enumerate(merged) if _tier_match_key(t)
+    }
+    for tier in incoming:
+        key = _tier_match_key(tier)
+        if key and key in index_by_key:
+            existing = merged[index_by_key[key]]
+            if existing.price is None and tier.price is not None:
+                merged[index_by_key[key]] = tier
+        else:
+            merged.append(tier)
+            if key:
+                index_by_key[key] = len(merged) - 1
+    return merged
+
+
 def _dedupe_candidates(candidates: list[CandidateProduct]) -> list[CandidateProduct]:
     """Groups candidates by (name, page, sku); duplicate-keyed candidates are
-    merged into the first occurrence instead of dropped, unioning their
-    price_variants so a variant table split across chunks isn't lost."""
+    merged into the first occurrence, unioning variants and price_tiers."""
     order: list[tuple[str, int | None, str | None]] = []
     groups: dict[tuple[str, int | None, str | None], CandidateProduct] = {}
     for c in candidates:
@@ -251,7 +408,8 @@ def _dedupe_candidates(candidates: list[CandidateProduct]) -> list[CandidateProd
             order.append(key)
         else:
             base = groups[key]
-            base.price_variants = _merge_variants(base.price_variants, c.price_variants)
+            base.variants = _merge_variants(base.variants, c.variants)
+            base.price_tiers = _merge_price_tiers(base.price_tiers, c.price_tiers)
     return [groups[key] for key in order]
 
 
