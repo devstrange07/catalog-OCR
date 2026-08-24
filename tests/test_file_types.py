@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.file_types import (
+    DEEPSEEK_VISION_IMAGE_SUFFIXES,
     GEMINI_TEXT_SUFFIXES,
     IMAGE_PDF_SUFFIXES,
     allowed_suffixes_for_channel,
@@ -21,6 +22,7 @@ def test_mime_for_suffix_text_and_image():
     assert mime_for_suffix(".csv") == "text/csv"
     assert mime_for_suffix(".json") == "application/json"
     assert mime_for_suffix(".png") == "image/png"
+    assert mime_for_suffix(".gif") == "image/gif"
     with pytest.raises(ValueError):
         mime_for_suffix(".xlsx")
 
@@ -28,10 +30,40 @@ def test_mime_for_suffix_text_and_image():
 def test_allowed_suffixes_channel_aware():
     paddle = allowed_suffixes_for_channel(ParseChannel.paddleocr)
     gemini = allowed_suffixes_for_channel(ParseChannel.gemini)
+    deepseek = allowed_suffixes_for_channel(ParseChannel.deepseek_direct)
     assert paddle == IMAGE_PDF_SUFFIXES
     assert ".csv" not in paddle
     assert GEMINI_TEXT_SUFFIXES <= gemini
     assert IMAGE_PDF_SUFFIXES <= gemini
+    assert deepseek == DEEPSEEK_VISION_IMAGE_SUFFIXES
+    assert ".gif" in deepseek
+    assert ".webp" in deepseek
+    assert ".pdf" not in deepseek
+    assert ".bmp" not in deepseek
+
+
+def test_api_rejects_pdf_on_deepseek_direct(monkeypatch):
+    monkeypatch.setattr("app.pipeline.run_pipeline", lambda job_id: None)
+    client = TestClient(app)
+    resp = client.post(
+        "/api/jobs",
+        files={"file": ("catalog.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf")},
+        data={"parse_channel": "deepseek_direct"},
+    )
+    assert resp.status_code == 400
+    assert "pdf" in resp.json()["detail"].lower()
+
+
+def test_api_accepts_gif_on_deepseek_direct(monkeypatch):
+    monkeypatch.setattr("app.pipeline.run_pipeline", lambda job_id: None)
+    client = TestClient(app)
+    resp = client.post(
+        "/api/jobs",
+        files={"file": ("page.gif", io.BytesIO(b"GIF89a"), "image/gif")},
+        data={"parse_channel": "deepseek_direct"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["meta"]["parse_channel"] == "deepseek_direct"
 
 
 def test_api_rejects_csv_on_paddleocr(tmp_path, monkeypatch):

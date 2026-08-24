@@ -22,7 +22,7 @@ class UrlJobRequest(BaseModel):
     url: str = Field(..., min_length=1, description="Single catalog/page URL to fetch")
     parse_channel: ParseChannel | None = Field(
         default=None,
-        description="Stage-1 parser channel: paddleocr, gemini, or unlimited_ocr",
+        description="Stage-1 parser channel: paddleocr, gemini, unlimited_ocr, or deepseek_direct",
     )
 
 
@@ -83,6 +83,11 @@ async def create_job_from_url(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     channel = pipe._resolve_parse_channel(body.parse_channel)
+    if channel == ParseChannel.deepseek_direct:
+        raise HTTPException(
+            status_code=400,
+            detail="deepseek_direct is upload-only; use POST /api/jobs.",
+        )
     suffix = _suffix_from_url(url)
     if suffix:
         allowed = allowed_suffixes_for_channel(channel)

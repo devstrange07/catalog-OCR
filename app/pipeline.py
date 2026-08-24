@@ -13,7 +13,7 @@ from typing import Any, Callable
 from app.config import OUTPUTS_DIR, settings
 from app.models.document import ParsedDocument
 from app.models.pipeline import JobRecord, JobStatus, ParseChannel, ProgressEvent, StageInfo, StageStatus
-from app.models.product import ProductStatus
+from app.models.product import CandidateProduct, ProductStatus
 from app.stages.crawl import (
     BinaryFetch,
     CrawlError,
@@ -23,6 +23,7 @@ from app.stages.crawl import (
     normalize_url,
     parsed_document_from_markdown,
 )
+from app.stages.extract_deepseek_direct import extract_products_deepseek_direct
 from app.stages.extract_gemini import extract_products_gemini
 from app.stages.parse import parse_document
 from app.stages.parse_gemini import parse_document_gemini
@@ -52,7 +53,9 @@ def _resolve_parse_channel(value: str | ParseChannel | None) -> ParseChannel:
     try:
         return ParseChannel(normalized)
     except ValueError as exc:
-        raise ValueError(f"Unsupported parse channel '{raw}'. Use paddleocr, gemini, or unlimited_ocr.") from exc
+        raise ValueError(
+            f"Unsupported parse channel '{raw}'. Use paddleocr, gemini, unlimited_ocr, or deepseek_direct."
+        ) from exc
 
 
 def _now() -> datetime:
@@ -313,6 +316,111 @@ def _run_extract_validate(
     )
 
 
+def _page_count_from_candidates(candidates: list[CandidateProduct]) -> int | None:
+    pages = [c.page for c in candidates if c.page is not None]
+    return max(pages) if pages else None
+
+
+def _skip_parse_for_deepseek_direct(job_id: str) -> None:
+    _set_stage(job_id, STAGE_PARSE, StageStatus.skipped)
+    _emit_progress(
+        job_id,
+        STAGE_PARSE,
+        "skipped",
+        "Skipping document parse — DeepSeek Vision direct extraction from original image",
+        percent=1,
+        detail={"parse_channel": ParseChannel.deepseek_direct.value},
+    )
+
+
+def _run_deepseek_direct_extract_validate(
+    job_id: str,
+    on_progress: ProgressCallback,
+    *,
+    source: Path,
+) -> None:
+    out = _job_dir(job_id)
+
+    _update_job(job_id, status=JobStatus.extracting)
+    _set_stage(job_id, STAGE_EXTRACT, StageStatus.running)
+    _emit_progress(
+        job_id,
+        STAGE_EXTRACT,
+        "start",
+        "Starting DeepSeek Vision direct product extraction…",
+        percent=56,
+        detail={"parse_channel": ParseChannel.deepseek_direct.value},
+    )
+    candidates = extract_products_deepseek_direct(source, on_progress=on_progress)
+    _emit_progress(
+        job_id,
+        STAGE_EXTRACT,
+        "saving_candidates",
+        "Saving candidates.json…",
+        percent=83,
+        detail={"candidate_count": len(candidates)},
+    )
+    _write_json(
+        out / "candidates.json",
+        [c.model_dump(mode="json") for c in candidates],
+    )
+    _set_stage(job_id, STAGE_EXTRACT, StageStatus.completed)
+    _update_job(
+        job_id,
+        candidate_count=len(candidates),
+        page_count=_page_count_from_candidates(candidates),
+        parsed_preview=None,
+    )
+    _emit_progress(
+        job_id,
+        STAGE_EXTRACT,
+        "extract_complete",
+        f"Extraction complete — {len(candidates)} candidate(s)",
+        percent=85,
+        detail={"candidate_count": len(candidates)},
+    )
+
+    _update_job(job_id, status=JobStatus.validating)
+    _set_stage(job_id, STAGE_VALIDATE, StageStatus.running)
+    _emit_progress(
+        job_id,
+        STAGE_VALIDATE,
+        "start",
+        "Starting validation…",
+        percent=86,
+    )
+    products = validate_products(candidates, parsed=None, on_progress=on_progress)
+    _emit_progress(
+        job_id,
+        STAGE_VALIDATE,
+        "saving_products",
+        "Saving products.json…",
+        percent=97,
+    )
+    _write_json(
+        out / "products.json",
+        [p.model_dump(mode="json") for p in products],
+    )
+    validated = sum(1 for p in products if p.status == ProductStatus.validated)
+    rejected = sum(1 for p in products if p.status == ProductStatus.rejected)
+    _set_stage(job_id, STAGE_VALIDATE, StageStatus.completed)
+    _update_job(
+        job_id,
+        status=JobStatus.completed,
+        products=products,
+        validated_count=validated,
+        rejected_count=rejected,
+    )
+    _emit_progress(
+        job_id,
+        "pipeline",
+        "completed",
+        f"Done — {validated} validated, {rejected} rejected",
+        percent=100,
+        detail={"validated": validated, "rejected": rejected},
+    )
+
+
 def _parse_document_for_channel(
     source: Path,
     filename: str,
@@ -321,6 +429,8 @@ def _parse_document_for_channel(
 ) -> ParsedDocument:
     if parse_channel == ParseChannel.gemini:
         return parse_document_gemini(source, source_filename=filename, on_progress=on_progress)
+    if parse_channel == ParseChannel.deepseek_direct:
+        raise RuntimeError("deepseek_direct does not produce a ParsedDocument")
     if parse_channel == ParseChannel.unlimited_ocr:
         return parse_document_unlimited_ocr(source, source_filename=filename, on_progress=on_progress)
     return parse_document(source, source_filename=filename, on_progress=on_progress)
@@ -340,42 +450,46 @@ def run_pipeline(job_id: str) -> None:
     stage_order = [STAGE_PARSE, STAGE_EXTRACT, STAGE_VALIDATE]
 
     try:
-        _update_job(job_id, status=JobStatus.parsing)
-        _set_stage(job_id, STAGE_PARSE, StageStatus.running)
-        _emit_progress(
-            job_id,
-            STAGE_PARSE,
-            "start",
-            f"Starting document parsing via {parse_channel.value}…",
-            percent=1,
-        )
-        parsed = _parse_document_for_channel(
-            source=source,
-            filename=job.filename,
-            parse_channel=parse_channel,
-            on_progress=on_progress,
-        )
-        _emit_progress(
-            job_id,
-            STAGE_PARSE,
-            "saving_parsed",
-            "Saving parsed.json…",
-            percent=52,
-        )
-        _write_json(out / "parsed.json", parsed.model_dump(mode="json"))
-        preview = parsed.text_for_extraction(4000)
-        _set_stage(job_id, STAGE_PARSE, StageStatus.completed)
-        _update_job(job_id, page_count=parsed.page_count, parsed_preview=preview)
-        _emit_progress(
-            job_id,
-            STAGE_PARSE,
-            "parse_complete",
-            f"Parsing complete via {parse_channel.value} — {parsed.page_count} page(s)",
-            percent=55,
-            detail={"page_count": parsed.page_count},
-        )
+        if parse_channel == ParseChannel.deepseek_direct:
+            _skip_parse_for_deepseek_direct(job_id)
+            _run_deepseek_direct_extract_validate(job_id, on_progress, source=source)
+        else:
+            _update_job(job_id, status=JobStatus.parsing)
+            _set_stage(job_id, STAGE_PARSE, StageStatus.running)
+            _emit_progress(
+                job_id,
+                STAGE_PARSE,
+                "start",
+                f"Starting document parsing via {parse_channel.value}…",
+                percent=1,
+            )
+            parsed = _parse_document_for_channel(
+                source=source,
+                filename=job.filename,
+                parse_channel=parse_channel,
+                on_progress=on_progress,
+            )
+            _emit_progress(
+                job_id,
+                STAGE_PARSE,
+                "saving_parsed",
+                "Saving parsed.json…",
+                percent=52,
+            )
+            _write_json(out / "parsed.json", parsed.model_dump(mode="json"))
+            preview = parsed.text_for_extraction(4000)
+            _set_stage(job_id, STAGE_PARSE, StageStatus.completed)
+            _update_job(job_id, page_count=parsed.page_count, parsed_preview=preview)
+            _emit_progress(
+                job_id,
+                STAGE_PARSE,
+                "parse_complete",
+                f"Parsing complete via {parse_channel.value} — {parsed.page_count} page(s)",
+                percent=55,
+                detail={"page_count": parsed.page_count},
+            )
 
-        _run_extract_validate(job_id, parsed, on_progress)
+            _run_extract_validate(job_id, parsed, on_progress)
     except Exception as exc:
         _fail_pipeline(job_id, exc, stage_order)
 
