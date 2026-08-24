@@ -28,10 +28,12 @@ def test_mime_for_suffix_text_and_image():
 def test_allowed_suffixes_channel_aware():
     paddle = allowed_suffixes_for_channel(ParseChannel.paddleocr)
     gemini = allowed_suffixes_for_channel(ParseChannel.gemini)
+    direct = allowed_suffixes_for_channel(ParseChannel.gemini_direct)
     assert paddle == IMAGE_PDF_SUFFIXES
     assert ".csv" not in paddle
     assert GEMINI_TEXT_SUFFIXES <= gemini
     assert IMAGE_PDF_SUFFIXES <= gemini
+    assert direct == gemini
 
 
 def test_api_rejects_csv_on_paddleocr(tmp_path, monkeypatch):
@@ -61,6 +63,19 @@ def test_api_accepts_csv_on_gemini(tmp_path, monkeypatch):
     assert body["filename"] == "prices.csv"
 
 
+def test_api_accepts_csv_on_gemini_direct(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.pipeline.run_pipeline", lambda job_id: None)
+    client = TestClient(app)
+    resp = client.post(
+        "/api/jobs",
+        files={"file": ("prices.csv", io.BytesIO(b"name,price\nA,1\n"), "text/csv")},
+        data={"parse_channel": "gemini_direct"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["meta"]["parse_channel"] == "gemini_direct"
+
+
 def test_api_rejects_xlsx_even_on_gemini(monkeypatch):
     monkeypatch.setattr("app.pipeline.run_pipeline", lambda job_id: None)
     client = TestClient(app)
@@ -74,6 +89,24 @@ def test_api_rejects_xlsx_even_on_gemini(monkeypatch):
             )
         },
         data={"parse_channel": "gemini"},
+    )
+    assert resp.status_code == 400
+    assert "xlsx" in resp.json()["detail"].lower()
+
+
+def test_api_rejects_xlsx_on_gemini_direct(monkeypatch):
+    monkeypatch.setattr("app.pipeline.run_pipeline", lambda job_id: None)
+    client = TestClient(app)
+    resp = client.post(
+        "/api/jobs",
+        files={
+            "file": (
+                "sheet.xlsx",
+                io.BytesIO(b"PK\x03\x04fake"),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+        data={"parse_channel": "gemini_direct"},
     )
     assert resp.status_code == 400
     assert "xlsx" in resp.json()["detail"].lower()

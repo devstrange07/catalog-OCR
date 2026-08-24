@@ -6,10 +6,8 @@ ParsedDocument only (no product fields).
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
-import time
 from pathlib import Path
 from typing import Any
 
@@ -17,16 +15,18 @@ import httpx
 import numpy as np
 
 from app.config import settings
-from app.file_types import mime_for_suffix
 from app.models.document import BBox, ParsedDocument, ParsedPage, TextBlock
+from app.stages.gemini_transport import (
+    GENERATE_TIMEOUT as _GENERATE_TIMEOUT,
+    build_file_part,
+    delete_gemini_file as _delete_gemini_file,
+    extract_json_text as _extract_json_text,
+    generate_content_url,
+    mime_for_path as _mime_for_path,
+)
 from app.stages.spatial import group_into_rows
 
 logger = logging.getLogger(__name__)
-
-_INLINE_MAX_BYTES = 15 * 1024 * 1024
-_GENERATE_TIMEOUT = 180.0
-_FILES_POLL_TIMEOUT = 120.0
-_FILES_POLL_INTERVAL = 1.5
 
 _PROMPT = """You are parsing a catalog document (PDF, image, or text file such as CSV/HTML).
 Extract all visible text in reading order across every page.
@@ -60,27 +60,6 @@ def _notify(
         on_progress("parse", step, message, percent=percent, detail=detail)
 
 
-def _mime_for_path(path: Path) -> str:
-    return mime_for_suffix(path.suffix.lower())
-
-
-def _extract_json_text(payload: dict[str, Any]) -> str:
-    candidates = payload.get("candidates") or []
-    if not candidates:
-        raise RuntimeError("Gemini returned no candidates.")
-    content = candidates[0].get("content") or {}
-    parts = content.get("parts") or []
-    texts = [p.get("text", "") for p in parts if isinstance(p, dict)]
-    text = "\n".join(t for t in texts if t).strip()
-    if not text:
-        raise RuntimeError("Gemini returned empty content.")
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:].strip()
-    return text
-
-
 def _bbox_from_list(raw: Any) -> BBox | None:
     if not isinstance(raw, list) or len(raw) != 4:
         return None
@@ -89,120 +68,6 @@ def _bbox_from_list(raw: Any) -> BBox | None:
     except Exception:
         return None
     return BBox(x0=float(vals[0]), y0=float(vals[1]), x1=float(vals[2]), y1=float(vals[3]))
-
-
-def _upload_to_gemini_files(
-    client: httpx.Client,
-    path: Path,
-    mime: str,
-    data: bytes,
-) -> str:
-    """Upload via Files API; return file URI. Polls until ACTIVE."""
-    key = settings.gemini_api_key
-    # Resumable / simple upload: multipart metadata + file
-    meta = {"file": {"display_name": path.name}}
-    resp = client.post(
-        "https://generativelanguage.googleapis.com/upload/v1beta/files",
-        params={"key": key},
-        headers={"X-Goog-Upload-Protocol": "multipart"},
-        files={
-            "metadata": ("metadata.json", json.dumps(meta), "application/json"),
-            "file": (path.name, data, mime),
-        },
-    )
-    if resp.status_code >= 400:
-        raise RuntimeError(f"Gemini Files upload failed ({resp.status_code}): {resp.text[:300]}")
-
-    body = resp.json()
-    file_obj = body.get("file") if isinstance(body.get("file"), dict) else body
-    name = file_obj.get("name")
-    uri = file_obj.get("uri")
-    state = (file_obj.get("state") or "").upper()
-    if not name:
-        raise RuntimeError("Gemini Files upload returned no file name.")
-
-    deadline = time.monotonic() + _FILES_POLL_TIMEOUT
-    while state in {"", "PROCESSING"}:
-        if time.monotonic() > deadline:
-            raise RuntimeError(f"Gemini Files upload timed out waiting for ACTIVE (state={state!r}).")
-        time.sleep(_FILES_POLL_INTERVAL)
-        poll = client.get(
-            f"https://generativelanguage.googleapis.com/v1beta/{name}",
-            params={"key": key},
-        )
-        if poll.status_code >= 400:
-            raise RuntimeError(f"Gemini Files poll failed ({poll.status_code}): {poll.text[:300]}")
-        file_obj = poll.json()
-        state = (file_obj.get("state") or "").upper()
-        uri = file_obj.get("uri") or uri
-
-    if state == "FAILED":
-        raise RuntimeError("Gemini Files upload entered FAILED state.")
-    if state != "ACTIVE" or not uri:
-        raise RuntimeError(f"Gemini Files upload not usable (state={state!r}, uri={uri!r}).")
-    return uri
-
-
-def _delete_gemini_file(client: httpx.Client, file_uri: str) -> None:
-    """Best-effort delete of an uploaded Files API object."""
-    # URI looks like https://generativelanguage.googleapis.com/v1beta/files/xxx
-    # or files/xxx — DELETE needs v1beta/files/xxx
-    name = file_uri.rstrip("/").split("/")[-1]
-    if not name:
-        return
-    try:
-        client.delete(
-            f"https://generativelanguage.googleapis.com/v1beta/files/{name}",
-            params={"key": settings.gemini_api_key},
-        )
-    except Exception:
-        logger.debug("Best-effort Gemini file delete failed for %s", name, exc_info=True)
-
-
-def _build_file_part(
-    client: httpx.Client,
-    path: Path,
-    *,
-    on_progress=None,
-) -> tuple[dict[str, Any], str, str | None]:
-    """Return (file_part, transport, uploaded_file_uri_or_none)."""
-    mime = _mime_for_path(path)
-    data = path.read_bytes()
-    size = len(data)
-
-    if size <= _INLINE_MAX_BYTES:
-        _notify(
-            on_progress,
-            "prepare_file",
-            f"Sending document inline ({size} bytes)…",
-            percent=12,
-            detail={"transport": "inline", "bytes": size, "mime": mime},
-        )
-        part = {
-            "inline_data": {
-                "mime_type": mime,
-                "data": base64.b64encode(data).decode("ascii"),
-            }
-        }
-        return part, "inline", None
-
-    _notify(
-        on_progress,
-        "upload_file",
-        f"Uploading document via Files API ({size} bytes)…",
-        percent=10,
-        detail={"transport": "files_api", "bytes": size, "mime": mime},
-    )
-    uri = _upload_to_gemini_files(client, path, mime, data)
-    _notify(
-        on_progress,
-        "upload_file",
-        "Files API upload ready",
-        percent=18,
-        detail={"transport": "files_api", "file_uri": uri},
-    )
-    part = {"file_data": {"mime_type": mime, "file_uri": uri}}
-    return part, "files_api", uri
 
 
 def _page_from_raw(raw_page: dict[str, Any], page_number: int) -> ParsedPage:
@@ -279,15 +144,14 @@ def parse_document_gemini(
     filename = source_filename or path.name
     _notify(on_progress, "loading_gemini", "Preparing Gemini vision parser…", percent=3)
 
-    endpoint = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.gemini_model}:generateContent"
-    )
+    endpoint = generate_content_url()
     uploaded_uri: str | None = None
     transport = "inline"
 
     with httpx.Client(timeout=_GENERATE_TIMEOUT) as client:
-        file_part, transport, uploaded_uri = _build_file_part(client, path, on_progress=on_progress)
+        file_part, transport, uploaded_uri, _, _ = build_file_part(
+            client, path, on_progress=on_progress, progress_stage="parse"
+        )
         payload = {
             "contents": [
                 {

@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from app import pipeline as pipe
 from app.config import OUTPUTS_DIR
-from app.file_types import GEMINI_TEXT_SUFFIXES, allowed_suffixes_for_channel
+from app.file_types import GEMINI_TEXT_SUFFIXES, allowed_suffixes_for_channel, is_gemini_native_channel
 from app.models.pipeline import JobRecord, ParseChannel
 from app.stages.crawl import CrawlError, normalize_url
 
@@ -22,7 +22,7 @@ class UrlJobRequest(BaseModel):
     url: str = Field(..., min_length=1, description="Single catalog/page URL to fetch")
     parse_channel: ParseChannel | None = Field(
         default=None,
-        description="Stage-1 parser channel: paddleocr, gemini, or unlimited_ocr",
+        description="Parse channel: paddleocr, gemini, gemini_direct, or unlimited_ocr",
     )
 
 
@@ -53,8 +53,8 @@ async def create_job(
     allowed = allowed_suffixes_for_channel(channel)
     if suffix not in allowed:
         hint = ""
-        if suffix in GEMINI_TEXT_SUFFIXES and channel != ParseChannel.gemini:
-            hint = " Text formats (csv/txt/md/html/xml/json/rtf) require parse_channel=gemini."
+        if suffix in GEMINI_TEXT_SUFFIXES and not is_gemini_native_channel(channel):
+            hint = " Text formats (csv/txt/md/html/xml/json/rtf) require parse_channel=gemini or gemini_direct."
         raise HTTPException(
             status_code=400,
             detail=(
@@ -91,8 +91,8 @@ async def create_job_from_url(
 
         if suffix in (IMAGE_PDF_SUFFIXES | GEMINI_TEXT_SUFFIXES) and suffix not in allowed:
             hint = ""
-            if suffix in GEMINI_TEXT_SUFFIXES and channel != ParseChannel.gemini:
-                hint = " Text formats require parse_channel=gemini."
+            if suffix in GEMINI_TEXT_SUFFIXES and not is_gemini_native_channel(channel):
+                hint = " Text formats require parse_channel=gemini or gemini_direct."
             raise HTTPException(
                 status_code=400,
                 detail=(

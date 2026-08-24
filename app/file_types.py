@@ -55,11 +55,15 @@ def mime_for_suffix(suffix: str) -> str:
     return mime
 
 
-def allowed_suffixes_for_channel(channel: ParseChannel | str) -> set[str]:
+def is_gemini_native_channel(channel: ParseChannel | str) -> bool:
     if isinstance(channel, ParseChannel):
         value = channel
     else:
         value = ParseChannel(str(channel).strip().lower())
-    if value == ParseChannel.gemini:
+    return value in {ParseChannel.gemini, ParseChannel.gemini_direct}
+
+
+def allowed_suffixes_for_channel(channel: ParseChannel | str) -> set[str]:
+    if is_gemini_native_channel(channel):
         return IMAGE_PDF_SUFFIXES | GEMINI_TEXT_SUFFIXES
     return set(IMAGE_PDF_SUFFIXES)

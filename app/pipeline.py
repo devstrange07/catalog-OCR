@@ -13,7 +13,8 @@ from typing import Any, Callable
 from app.config import OUTPUTS_DIR, settings
 from app.models.document import ParsedDocument
 from app.models.pipeline import JobRecord, JobStatus, ParseChannel, ProgressEvent, StageInfo, StageStatus
-from app.models.product import ProductStatus
+from app.models.product import CandidateProduct, ProductStatus
+from app.observability.langsmith import trace_span
 from app.stages.crawl import (
     BinaryFetch,
     CrawlError,
@@ -24,6 +25,12 @@ from app.stages.crawl import (
     parsed_document_from_markdown,
 )
 from app.stages.extract_gemini import extract_products_gemini
+from app.stages.extract_gemini_direct import (
+    DirectQualityReport,
+    apply_direct_quality_warnings,
+    extract_products_gemini_direct,
+    extract_products_gemini_direct_from_text,
+)
 from app.stages.parse import parse_document
 from app.stages.parse_gemini import parse_document_gemini
 from app.stages.parse_unlimited_ocr import parse_document_unlimited_ocr
@@ -52,7 +59,9 @@ def _resolve_parse_channel(value: str | ParseChannel | None) -> ParseChannel:
     try:
         return ParseChannel(normalized)
     except ValueError as exc:
-        raise ValueError(f"Unsupported parse channel '{raw}'. Use paddleocr, gemini, or unlimited_ocr.") from exc
+        raise ValueError(
+            f"Unsupported parse channel '{raw}'. Use paddleocr, gemini, gemini_direct, or unlimited_ocr."
+        ) from exc
 
 
 def _now() -> datetime:
@@ -209,6 +218,17 @@ def create_job_from_url(url: str, parse_channel: str | ParseChannel | None = Non
 
 
 def _fail_pipeline(job_id: str, exc: Exception, stage_order: list[str]) -> None:
+    with trace_span(
+        "pipeline.fail",
+        run_type="tool",
+        metadata={
+            "job_id": job_id,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        },
+        tags=["pipeline", "failure"],
+    ):
+        pass
     logger.exception("Pipeline failed for job %s", job_id)
     current = get_job(job_id)
     failed_stage = None
@@ -234,21 +254,20 @@ def _fail_pipeline(job_id: str, exc: Exception, stage_order: list[str]) -> None:
     _update_job(job_id, status=JobStatus.failed, error=str(exc))
 
 
-def _run_extract_validate(
-    job_id: str, parsed: ParsedDocument, on_progress: ProgressCallback
+def _page_count_from_candidates(candidates: list[CandidateProduct]) -> int | None:
+    pages = [c.page for c in candidates if c.page is not None]
+    return max(pages) if pages else None
+
+
+def _persist_candidates_and_validate(
+    job_id: str,
+    candidates: list[CandidateProduct],
+    parsed: ParsedDocument | None,
+    on_progress: ProgressCallback,
+    *,
+    quality: DirectQualityReport | None = None,
 ) -> None:
     out = _job_dir(job_id)
-
-    _update_job(job_id, status=JobStatus.extracting)
-    _set_stage(job_id, STAGE_EXTRACT, StageStatus.running)
-    _emit_progress(
-        job_id,
-        STAGE_EXTRACT,
-        "start",
-        "Starting product extraction…",
-        percent=56,
-    )
-    candidates = extract_products_gemini(parsed, on_progress=on_progress)
     _emit_progress(
         job_id,
         STAGE_EXTRACT,
@@ -281,7 +300,20 @@ def _run_extract_validate(
         "Starting validation…",
         percent=86,
     )
-    products = validate_products(candidates, parsed=parsed, on_progress=on_progress)
+    with trace_span(
+        "pipeline.stage.validate",
+        run_type="tool",
+        metadata={"job_id": job_id, "stage": STAGE_VALIDATE, "candidate_count": len(candidates)},
+        tags=["pipeline", "validate"],
+    ):
+        products = validate_products(candidates, parsed=parsed, on_progress=on_progress)
+    if quality is not None:
+        apply_direct_quality_warnings(products, quality)
+        job = get_job(job_id)
+        if job is not None:
+            meta = dict(job.meta)
+            meta["direct_quality"] = quality.as_dict()
+            _update_job(job_id, meta=meta)
     _emit_progress(
         job_id,
         STAGE_VALIDATE,
@@ -309,7 +341,106 @@ def _run_extract_validate(
         "completed",
         f"Done — {validated} validated, {rejected} rejected",
         percent=100,
-        detail={"validated": validated, "rejected": rejected},
+        detail={
+            "validated": validated,
+            "rejected": rejected,
+            **({"direct_quality": quality.as_dict()} if quality is not None else {}),
+        },
+    )
+
+
+def _run_extract_validate(
+    job_id: str, parsed: ParsedDocument, on_progress: ProgressCallback
+) -> None:
+    _update_job(job_id, status=JobStatus.extracting)
+    _set_stage(job_id, STAGE_EXTRACT, StageStatus.running)
+    _emit_progress(
+        job_id,
+        STAGE_EXTRACT,
+        "start",
+        "Starting product extraction…",
+        percent=56,
+    )
+    with trace_span(
+        "pipeline.stage.extract",
+        run_type="tool",
+        metadata={"job_id": job_id, "stage": STAGE_EXTRACT, "channel": "gemini"},
+        tags=["pipeline", "extract"],
+    ):
+        candidates = extract_products_gemini(parsed, on_progress=on_progress)
+    _persist_candidates_and_validate(job_id, candidates, parsed, on_progress)
+
+
+def _run_direct_extract_validate(
+    job_id: str,
+    on_progress: ProgressCallback,
+    *,
+    source: Path | None = None,
+    markdown: str | None = None,
+) -> None:
+    _update_job(job_id, status=JobStatus.extracting)
+    _set_stage(job_id, STAGE_EXTRACT, StageStatus.running)
+    _emit_progress(
+        job_id,
+        STAGE_EXTRACT,
+        "start",
+        "Starting Gemini direct product extraction…",
+        percent=56,
+        detail={"parse_channel": ParseChannel.gemini_direct.value},
+    )
+    with trace_span(
+        "pipeline.stage.extract",
+        run_type="tool",
+        metadata={
+            "job_id": job_id,
+            "stage": STAGE_EXTRACT,
+            "channel": ParseChannel.gemini_direct.value,
+            "source_type": "markdown" if markdown is not None else "file",
+        },
+        tags=["pipeline", "extract", "gemini_direct"],
+    ):
+        if markdown is not None:
+            result = extract_products_gemini_direct_from_text(
+                markdown, on_progress=on_progress
+            )
+        elif source is not None:
+            result = extract_products_gemini_direct(source, on_progress=on_progress)
+        else:
+            raise RuntimeError("Gemini direct extraction requires a source file or crawl markdown.")
+    _update_job(
+        job_id,
+        page_count=_page_count_from_candidates(result.candidates),
+        parsed_preview=None,
+    )
+    _persist_candidates_and_validate(
+        job_id,
+        result.candidates,
+        parsed=None,
+        on_progress=on_progress,
+        quality=result.quality,
+    )
+    job = get_job(job_id)
+    if job:
+        logger.info(
+            "gemini_direct Stage 3 validation validated=%s rejected=%s candidates=%s "
+            "quality_suspicious=%s repaired=%s",
+            job.validated_count,
+            job.rejected_count,
+            job.candidate_count,
+            result.quality.suspicious,
+            result.quality.repaired,
+        )
+
+
+def _skip_parse_for_direct(job_id: str) -> None:
+    _set_stage(job_id, STAGE_PARSE, StageStatus.skipped)
+    _emit_progress(
+        job_id,
+        STAGE_PARSE,
+        "skipped",
+        "Skipping document parse — Gemini direct extraction from original file",
+        percent=1,
+        detail={"parse_channel": ParseChannel.gemini_direct.value},
     )
 
 
@@ -321,6 +452,8 @@ def _parse_document_for_channel(
 ) -> ParsedDocument:
     if parse_channel == ParseChannel.gemini:
         return parse_document_gemini(source, source_filename=filename, on_progress=on_progress)
+    if parse_channel == ParseChannel.gemini_direct:
+        raise RuntimeError("gemini_direct does not produce a ParsedDocument")
     if parse_channel == ParseChannel.unlimited_ocr:
         return parse_document_unlimited_ocr(source, source_filename=filename, on_progress=on_progress)
     return parse_document(source, source_filename=filename, on_progress=on_progress)
@@ -340,42 +473,59 @@ def run_pipeline(job_id: str) -> None:
     stage_order = [STAGE_PARSE, STAGE_EXTRACT, STAGE_VALIDATE]
 
     try:
-        _update_job(job_id, status=JobStatus.parsing)
-        _set_stage(job_id, STAGE_PARSE, StageStatus.running)
-        _emit_progress(
-            job_id,
-            STAGE_PARSE,
-            "start",
-            f"Starting document parsing via {parse_channel.value}…",
-            percent=1,
-        )
-        parsed = _parse_document_for_channel(
-            source=source,
-            filename=job.filename,
-            parse_channel=parse_channel,
-            on_progress=on_progress,
-        )
-        _emit_progress(
-            job_id,
-            STAGE_PARSE,
-            "saving_parsed",
-            "Saving parsed.json…",
-            percent=52,
-        )
-        _write_json(out / "parsed.json", parsed.model_dump(mode="json"))
-        preview = parsed.text_for_extraction(4000)
-        _set_stage(job_id, STAGE_PARSE, StageStatus.completed)
-        _update_job(job_id, page_count=parsed.page_count, parsed_preview=preview)
-        _emit_progress(
-            job_id,
-            STAGE_PARSE,
-            "parse_complete",
-            f"Parsing complete via {parse_channel.value} — {parsed.page_count} page(s)",
-            percent=55,
-            detail={"page_count": parsed.page_count},
-        )
+        with trace_span(
+            "pipeline.run",
+            run_type="chain",
+            inputs={"job_id": job_id, "parse_channel": parse_channel.value, "source_kind": "upload"},
+            metadata={"job_id": job_id, "filename": job.filename},
+            tags=["pipeline", "upload"],
+        ):
+            if parse_channel == ParseChannel.gemini_direct:
+                _skip_parse_for_direct(job_id)
+                _run_direct_extract_validate(job_id, on_progress, source=source)
+            else:
+                _update_job(job_id, status=JobStatus.parsing)
+                _set_stage(job_id, STAGE_PARSE, StageStatus.running)
+                _emit_progress(
+                    job_id,
+                    STAGE_PARSE,
+                    "start",
+                    f"Starting document parsing via {parse_channel.value}…",
+                    percent=1,
+                )
+                with trace_span(
+                    "pipeline.stage.parse",
+                    run_type="tool",
+                    metadata={"job_id": job_id, "stage": STAGE_PARSE, "channel": parse_channel.value},
+                    tags=["pipeline", "parse"],
+                ):
+                    parsed = _parse_document_for_channel(
+                        source=source,
+                        filename=job.filename,
+                        parse_channel=parse_channel,
+                        on_progress=on_progress,
+                    )
+                _emit_progress(
+                    job_id,
+                    STAGE_PARSE,
+                    "saving_parsed",
+                    "Saving parsed.json…",
+                    percent=52,
+                )
+                _write_json(out / "parsed.json", parsed.model_dump(mode="json"))
+                preview = parsed.text_for_extraction(4000)
+                _set_stage(job_id, STAGE_PARSE, StageStatus.completed)
+                _update_job(job_id, page_count=parsed.page_count, parsed_preview=preview)
+                _emit_progress(
+                    job_id,
+                    STAGE_PARSE,
+                    "parse_complete",
+                    f"Parsing complete via {parse_channel.value} — {parsed.page_count} page(s)",
+                    percent=55,
+                    detail={"page_count": parsed.page_count},
+                )
 
-        _run_extract_validate(job_id, parsed, on_progress)
+                _run_extract_validate(job_id, parsed, on_progress)
     except Exception as exc:
         _fail_pipeline(job_id, exc, stage_order)
 
@@ -398,105 +548,159 @@ def run_url_pipeline(job_id: str) -> None:
     source_url = job.meta.get("source_url") or ""
 
     try:
-        _update_job(job_id, status=JobStatus.parsing)
-        _set_stage(job_id, STAGE_CRAWL, StageStatus.running)
-        _emit_progress(job_id, STAGE_CRAWL, "start", "Starting URL crawl…", percent=1)
+        with trace_span(
+            "pipeline.run_url",
+            run_type="chain",
+            inputs={"job_id": job_id, "parse_channel": parse_channel.value, "source_kind": "url"},
+            metadata={"job_id": job_id, "source_url": source_url},
+            tags=["pipeline", "url"],
+        ):
+            _update_job(job_id, status=JobStatus.parsing)
+            _set_stage(job_id, STAGE_CRAWL, StageStatus.running)
+            _emit_progress(job_id, STAGE_CRAWL, "start", "Starting URL crawl…", percent=1)
 
-        try:
-            fetched = fetch_url(source_url, on_progress=on_progress)
-        except Exception as exc:
-            if isinstance(exc, CrawlError):
-                raise
-            raise CrawlError(str(exc)) from exc
+            try:
+                with trace_span(
+                    "pipeline.stage.crawl",
+                    run_type="tool",
+                    metadata={"job_id": job_id, "stage": STAGE_CRAWL},
+                    tags=["pipeline", "crawl"],
+                ):
+                    fetched = fetch_url(source_url, on_progress=on_progress)
+            except Exception as exc:
+                if isinstance(exc, CrawlError):
+                    raise
+                raise CrawlError(str(exc)) from exc
 
-        _write_json(out / "crawl.json", crawl_result_to_artifact(fetched))
-        _set_stage(job_id, STAGE_CRAWL, StageStatus.completed)
-        _emit_progress(
-            job_id,
-            STAGE_CRAWL,
-            "crawl_complete",
-            f"Crawl complete — {fetched.kind}",
-            percent=15,
-            detail={"kind": fetched.kind},
-        )
-
-        _set_stage(job_id, STAGE_PARSE, StageStatus.running)
-        _emit_progress(
-            job_id,
-            STAGE_PARSE,
-            "start",
-            f"Starting document parsing via {parse_channel.value}…",
-            percent=16,
-        )
-
-        if isinstance(fetched, BinaryFetch):
-            path = out / fetched.filename
-            path.write_bytes(fetched.data)
-            _update_job(
-                job_id,
-                filename=fetched.filename,
-                meta={
-                    **job.meta,
-                    "source_path": str(path),
-                    "source_url": fetched.source_url,
-                    "final_url": fetched.final_url,
-                    "fetch_kind": "binary",
-                },
-            )
-            parsed = _parse_document_for_channel(
-                source=path,
-                filename=fetched.filename,
-                parse_channel=parse_channel,
-                on_progress=on_progress,
-            )
-        elif isinstance(fetched, HtmlFetch):
-            _update_job(
-                job_id,
-                filename=fetched.title or job.filename,
-                meta={
-                    **job.meta,
-                    "source_url": fetched.source_url,
-                    "final_url": fetched.final_url,
-                    "fetch_kind": "html",
-                    "links_internal": fetched.links_internal,
-                },
-            )
+            _write_json(out / "crawl.json", crawl_result_to_artifact(fetched))
+            _set_stage(job_id, STAGE_CRAWL, StageStatus.completed)
             _emit_progress(
                 job_id,
-                STAGE_PARSE,
-                "markdown_to_parsed",
-                "Building ParsedDocument from crawl markdown (OCR skipped)…",
-                percent=40,
+                STAGE_CRAWL,
+                "crawl_complete",
+                f"Crawl complete — {fetched.kind}",
+                percent=15,
+                detail={"kind": fetched.kind},
             )
-            parsed = parsed_document_from_markdown(
-                fetched.markdown,
-                source_url=fetched.final_url or fetched.source_url,
-                title=fetched.title,
-            )
-        else:
-            raise CrawlError(f"Unknown fetch kind: {type(fetched)}")
 
-        _emit_progress(
-            job_id,
-            STAGE_PARSE,
-            "saving_parsed",
-            "Saving parsed.json…",
-            percent=52,
-        )
-        _write_json(out / "parsed.json", parsed.model_dump(mode="json"))
-        preview = parsed.text_for_extraction(4000)
-        _set_stage(job_id, STAGE_PARSE, StageStatus.completed)
-        _update_job(job_id, page_count=parsed.page_count, parsed_preview=preview)
-        _emit_progress(
-            job_id,
-            STAGE_PARSE,
-            "parse_complete",
-            f"Parsing complete via {parse_channel.value} — {parsed.page_count} page(s)",
-            percent=55,
-            detail={"page_count": parsed.page_count},
-        )
+            if parse_channel == ParseChannel.gemini_direct:
+                _skip_parse_for_direct(job_id)
+                if isinstance(fetched, BinaryFetch):
+                    path = out / fetched.filename
+                    path.write_bytes(fetched.data)
+                    _update_job(
+                        job_id,
+                        filename=fetched.filename,
+                        meta={
+                            **job.meta,
+                            "source_path": str(path),
+                            "source_url": fetched.source_url,
+                            "final_url": fetched.final_url,
+                            "fetch_kind": "binary",
+                        },
+                    )
+                    _run_direct_extract_validate(job_id, on_progress, source=path)
+                elif isinstance(fetched, HtmlFetch):
+                    _update_job(
+                        job_id,
+                        filename=fetched.title or job.filename,
+                        meta={
+                            **job.meta,
+                            "source_url": fetched.source_url,
+                            "final_url": fetched.final_url,
+                            "fetch_kind": "html",
+                            "links_internal": fetched.links_internal,
+                        },
+                    )
+                    _run_direct_extract_validate(
+                        job_id, on_progress, markdown=fetched.markdown
+                    )
+                else:
+                    raise CrawlError(f"Unknown fetch kind: {type(fetched)}")
+            else:
+                _set_stage(job_id, STAGE_PARSE, StageStatus.running)
+                _emit_progress(
+                    job_id,
+                    STAGE_PARSE,
+                    "start",
+                    f"Starting document parsing via {parse_channel.value}…",
+                    percent=16,
+                )
 
-        _run_extract_validate(job_id, parsed, on_progress)
+                with trace_span(
+                    "pipeline.stage.parse",
+                    run_type="tool",
+                    metadata={"job_id": job_id, "stage": STAGE_PARSE, "channel": parse_channel.value},
+                    tags=["pipeline", "parse"],
+                ):
+                    if isinstance(fetched, BinaryFetch):
+                        path = out / fetched.filename
+                        path.write_bytes(fetched.data)
+                        _update_job(
+                            job_id,
+                            filename=fetched.filename,
+                            meta={
+                                **job.meta,
+                                "source_path": str(path),
+                                "source_url": fetched.source_url,
+                                "final_url": fetched.final_url,
+                                "fetch_kind": "binary",
+                            },
+                        )
+                        parsed = _parse_document_for_channel(
+                            source=path,
+                            filename=fetched.filename,
+                            parse_channel=parse_channel,
+                            on_progress=on_progress,
+                        )
+                    elif isinstance(fetched, HtmlFetch):
+                        _update_job(
+                            job_id,
+                            filename=fetched.title or job.filename,
+                            meta={
+                                **job.meta,
+                                "source_url": fetched.source_url,
+                                "final_url": fetched.final_url,
+                                "fetch_kind": "html",
+                                "links_internal": fetched.links_internal,
+                            },
+                        )
+                        _emit_progress(
+                            job_id,
+                            STAGE_PARSE,
+                            "markdown_to_parsed",
+                            "Building ParsedDocument from crawl markdown (OCR skipped)…",
+                            percent=40,
+                        )
+                        parsed = parsed_document_from_markdown(
+                            fetched.markdown,
+                            source_url=fetched.final_url or fetched.source_url,
+                            title=fetched.title,
+                        )
+                    else:
+                        raise CrawlError(f"Unknown fetch kind: {type(fetched)}")
+
+                _emit_progress(
+                    job_id,
+                    STAGE_PARSE,
+                    "saving_parsed",
+                    "Saving parsed.json…",
+                    percent=52,
+                )
+                _write_json(out / "parsed.json", parsed.model_dump(mode="json"))
+                preview = parsed.text_for_extraction(4000)
+                _set_stage(job_id, STAGE_PARSE, StageStatus.completed)
+                _update_job(job_id, page_count=parsed.page_count, parsed_preview=preview)
+                _emit_progress(
+                    job_id,
+                    STAGE_PARSE,
+                    "parse_complete",
+                    f"Parsing complete via {parse_channel.value} — {parsed.page_count} page(s)",
+                    percent=55,
+                    detail={"page_count": parsed.page_count},
+                )
+
+                _run_extract_validate(job_id, parsed, on_progress)
     except Exception as exc:
         _fail_pipeline(job_id, exc, stage_order)
 

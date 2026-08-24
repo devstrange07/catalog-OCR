@@ -30,6 +30,7 @@
   function selectedParseChannel() {
     const checked = form.querySelector('input[name="parseChannel"]:checked');
     if (checked?.value === "gemini") return "gemini";
+    if (checked?.value === "gemini_direct") return "gemini_direct";
     if (checked?.value === "unlimited_ocr") return "unlimited_ocr";
     return "paddleocr";
   }
@@ -40,7 +41,7 @@
   function syncFileAccept() {
     const channel = selectedParseChannel();
     const dropHint = document.getElementById("dropHint");
-    if (channel === "gemini") {
+    if (channel === "gemini" || channel === "gemini_direct") {
       fileInput.accept = ACCEPT_IMAGE_PDF + ACCEPT_GEMINI_TEXT;
       if (dropHint) {
         dropHint.textContent =
@@ -56,6 +57,7 @@
 
   function channelLabel(channel) {
     if (channel === "gemini") return "Gemini Vision";
+    if (channel === "gemini_direct") return "Gemini Direct";
     if (channel === "unlimited_ocr") return "Unlimited OCR";
     return "PaddleOCR";
   }
@@ -64,6 +66,8 @@
     if (!parseStageHint) return;
     if (channel === "gemini") {
       parseStageHint.textContent = "Gemini Vision → structure only";
+    } else if (channel === "gemini_direct") {
+      parseStageHint.textContent = "skipped — original file → products";
     } else if (channel === "unlimited_ocr") {
       parseStageHint.textContent = "Unlimited-OCR markdown → structure only";
     } else {
