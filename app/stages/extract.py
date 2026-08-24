@@ -276,7 +276,7 @@ Rules:
   - billing_cycle = one_time | monthly | annual | per_use | per_session when recurring or usage-based.
   - discount = structured {amount, percent, description} when savings are printed.
   - When a table has multiple price columns (e.g. total price + EMI + price-per-sqft), capture the primary sale price in `price` and encode secondary amounts as price_tiers entries (label="EMI", label="per sqft").
-  - Section-header psf rates (e.g. "₹9,500/sqft") should appear as a price_tier on each item in that section, or be used to set `unit` = "sqft" if it is the sole pricing basis.
+  - Section-header rates (e.g. "₹9,500/sqft") must appear as a price_tier on EVERY item in that table/section (label like "per sqft" or "rate_per_unit"), or set `unit` if it is the sole pricing basis. Do not attach the header rate to only some rows.
 - Sizing:
   - unit = pricing basis (pc, kg, hour, seat, sqft, session).
   - pack_size = measure of one item (100ml, 500g, 60 min) — not a count.
@@ -296,6 +296,7 @@ Rules:
   - promotion, conditions, and description belong ONLY to items in the same section/box/table where the text appears. Never broadcast a promotion or condition across different project headings.
   - If a section heading names a project/location (e.g. "SKYLINE VISTAS, WHITEFIELD"), items under it share that context — but items under a DIFFERENT heading do not.
   - Page-wide legal lines (GST, stamp duty, RERA) that appear in a page header/footer may apply to all items. Section-specific terms (possession date, booking %, bank tie-ups) apply only to items in that section.
+  - Table footnotes and disclaimers (lines starting with *, †, Note:) apply to EVERY row of that same table, not a subset. Put them in conditions (or promotion when they are an offer).
   - When in doubt, leave promotion/conditions null rather than guessing scope.
 - Prefer ISO currency codes (INR, USD, EUR) when known; symbols like ₹/$/€ are acceptable.
 - If no products are present, call submit_products with an empty products array.

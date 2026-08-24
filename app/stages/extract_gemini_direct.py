@@ -69,6 +69,10 @@ many hollow ID-only rows.
 - Promotions and conditions belong ONLY to items in the same section/table
   where the text appears. Never broadcast a promotion across different
   project headings.
+- Table footnotes (*, †, Note:) and header-stated rates (e.g. ₹9,500/sqft)
+  apply to EVERY row of that same table. Put footnotes in conditions and
+  header rates as a price_tier (label "per sqft" or "rate_per_unit") on
+  each row — not on a subset.
 - Cover "from" summary lines are optional listings; never emit them instead of
   the detailed inventory rows they summarize.
 
@@ -128,6 +132,7 @@ visible. Preserve city→price relationships as labeled price_tiers.
 # Rules
 - Use ONLY what is visible. Do not invent values.
 - Promotions/conditions stay section-local.
+- Table footnotes and header-stated rates apply to every row of that table.
 - Do not invent OCR block IDs or bounding boxes.
 - Return JSON {"products": [...]} only.
 """
@@ -137,7 +142,8 @@ _USER_FILE = (
     "Inspect every page. Return JSON with a 'products' array. "
     "Prioritize complete SKU/table rows over cover summaries. "
     "Promotions and conditions belong ONLY to items in the same section/table "
-    "where the text appears. Use price_tiers for secondary prices (EMI, per-sqft) "
+    "where the text appears. Table footnotes and header rates apply to every "
+    "row of that table. Use price_tiers for secondary prices (EMI, per-sqft) "
     "and for city/locality matrix prices (label = city, billing_cycle = monthly)."
 )
 
@@ -154,7 +160,8 @@ _USER_TEXT = (
     "Return JSON with a 'products' array. "
     "Prioritize complete inventory rows over marketing summaries. "
     "Promotions and conditions belong ONLY to items in the same section/table "
-    "where the text appears. Use price_tiers for secondary prices (EMI, per-sqft) "
+    "where the text appears. Table footnotes and header rates apply to every "
+    "row of that table. Use price_tiers for secondary prices (EMI, per-sqft) "
     "and for city/locality matrix prices.\n\n"
 )
 

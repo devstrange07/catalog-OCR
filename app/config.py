@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     max_extract_chars: int = 24000
     extract_pages_per_chunk: int = 2
     extract_max_tokens: int = 32768
+    validate_coverage_repair: bool = False
     langsmith_enabled: bool = False
     langsmith_api_key: str = ""
     langsmith_project: str = "product-ocr"
