@@ -22,6 +22,7 @@
   let selectedFile = null;
   let pollTimer = null;
   let lastLogLen = 0;
+  const prismExportedJobIds = new Set();
 
   function urlValue() {
     return (urlInput?.value || "").trim();
@@ -333,13 +334,56 @@
 
     const names = ["parsed.json", "candidates.json", "products.json"];
     if (job.stages?.crawl) names.unshift("crawl.json");
-    artifacts.innerHTML = names
+    const artifactLinks = names
       .map(
         (n) =>
           `<a href="/api/jobs/${job.id}/artifacts/${n}" target="_blank" rel="noopener">${n}</a>`
       )
       .join("");
+    artifacts.innerHTML = artifactLinks + renderPrismControl(job);
   }
+
+  function renderPrismControl(job) {
+    if (prismExportedJobIds.has(job.id)) {
+      return `<a href="/api/jobs/${job.id}/export-prism" target="_blank" rel="noopener">products-prism.json</a>`;
+    }
+    return `<button type="button" class="artifact-action export-prism-btn" data-job-id="${escapeHtml(job.id)}">Export Prism</button>`;
+  }
+
+  async function exportPrism(jobId, btn) {
+    btn.disabled = true;
+    btn.textContent = "Exporting…";
+    errorBox.hidden = true;
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/export-prism`, { method: "POST" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        const detail = err.detail;
+        throw new Error(
+          typeof detail === "string" ? detail : `Export failed (${res.status})`
+        );
+      }
+      prismExportedJobIds.add(jobId);
+      const link = document.createElement("a");
+      link.href = `/api/jobs/${jobId}/export-prism`;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = "products-prism.json";
+      btn.replaceWith(link);
+    } catch (err) {
+      errorBox.hidden = false;
+      errorBox.textContent = err.message || String(err);
+      btn.disabled = false;
+      btn.textContent = "Export Prism";
+    }
+  }
+
+  artifacts.addEventListener("click", (e) => {
+    const btn = e.target.closest(".export-prism-btn");
+    if (!btn || btn.disabled) return;
+    const jobId = btn.dataset.jobId;
+    if (jobId) exportPrism(jobId, btn);
+  });
 
   function escapeHtml(s) {
     return String(s)

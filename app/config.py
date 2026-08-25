@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     unlimited_ocr_remote_url: str = ""
     unlimited_ocr_remote_api_key: str = ""
     unlimited_ocr_remote_timeout_sec: int = 180
+    prism_export_batch_size: int = 25
+    prism_price_tolerance_pct: float = 0.15
 
 
 settings = Settings()

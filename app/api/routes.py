@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -13,7 +14,10 @@ from app import pipeline as pipe
 from app.config import OUTPUTS_DIR
 from app.file_types import GEMINI_TEXT_SUFFIXES, allowed_suffixes_for_channel, is_gemini_native_channel
 from app.models.pipeline import JobRecord, ParseChannel
+from app.models.prism import PrismExportResult
+from app.models.product import ProductRecord
 from app.stages.crawl import CrawlError, normalize_url
+from app.stages.export_prism import export_products_prism
 
 router = APIRouter(prefix="/api")
 
@@ -130,3 +134,35 @@ def get_artifact(job_id: str, name: str) -> FileResponse:
             raise HTTPException(status_code=404, detail="Job not found")
         raise HTTPException(status_code=404, detail="Artifact not found")
     return FileResponse(path, media_type="application/json", filename=name)
+
+
+@router.post("/jobs/{job_id}/export-prism", response_model=PrismExportResult)
+def export_job_prism(job_id: str) -> PrismExportResult:
+    products_path = OUTPUTS_DIR / job_id / "products.json"
+    if not products_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="products.json not found for this job — run validation first",
+        )
+    raw = json.loads(products_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail="products.json must be a JSON array")
+    products = [ProductRecord.model_validate(p) for p in raw]
+    result = export_products_prism(products, job_id=job_id)
+    out_path = OUTPUTS_DIR / job_id / "products-prism.json"
+    out_path.write_text(
+        json.dumps(result.model_dump(mode="json"), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return result
+
+
+@router.get("/jobs/{job_id}/export-prism")
+def get_job_prism_export(job_id: str) -> FileResponse:
+    path = OUTPUTS_DIR / job_id / "products-prism.json"
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="products-prism.json not found — call POST first",
+        )
+    return FileResponse(path, media_type="application/json", filename="products-prism.json")
