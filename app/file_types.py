@@ -15,6 +15,15 @@ IMAGE_PDF_SUFFIXES: set[str] = {
     ".tiff",
 }
 
+# DeepSeek Vision (deepseek-v4-flash-vision-exp) — images only, no PDF.
+DEEPSEEK_VISION_IMAGE_SUFFIXES: set[str] = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+}
+
 # Gemini-native text MIME types (not Office Open XML — xlsx/docx unsupported).
 GEMINI_TEXT_SUFFIXES: set[str] = {
     ".csv",
@@ -33,6 +42,7 @@ _MIME_BY_SUFFIX: dict[str, str] = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
+    ".gif": "image/gif",
     ".bmp": "image/bmp",
     ".tif": "image/tiff",
     ".tiff": "image/tiff",
@@ -64,6 +74,12 @@ def is_gemini_native_channel(channel: ParseChannel | str) -> bool:
 
 
 def allowed_suffixes_for_channel(channel: ParseChannel | str) -> set[str]:
-    if is_gemini_native_channel(channel):
+    if isinstance(channel, ParseChannel):
+        value = channel
+    else:
+        value = ParseChannel(str(channel).strip().lower())
+    if value == ParseChannel.deepseek_direct:
+        return set(DEEPSEEK_VISION_IMAGE_SUFFIXES)
+    if is_gemini_native_channel(value):
         return IMAGE_PDF_SUFFIXES | GEMINI_TEXT_SUFFIXES
     return set(IMAGE_PDF_SUFFIXES)

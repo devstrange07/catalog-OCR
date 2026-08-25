@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash"
+    deepseek_vision_model: str = "deepseek-v4-flash-vision-exp"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
     gemini_inline_max_bytes: int = 2 * 1024 * 1024  # 2 MB

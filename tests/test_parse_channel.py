@@ -43,6 +43,7 @@ def test_resolve_parse_channel_default(monkeypatch):
 def test_resolve_parse_channel_enum_and_string():
     assert _resolve_parse_channel("gemini") == ParseChannel.gemini
     assert _resolve_parse_channel("gemini_direct") == ParseChannel.gemini_direct
+    assert _resolve_parse_channel("deepseek_direct") == ParseChannel.deepseek_direct
     assert _resolve_parse_channel(ParseChannel.paddleocr) == ParseChannel.paddleocr
 
 
@@ -140,6 +141,35 @@ def test_api_upload_accepts_gemini_direct_channel(tmp_path, monkeypatch):
     assert body["meta"]["parse_channel"] == "gemini_direct"
 
 
+def test_api_upload_accepts_deepseek_direct_channel(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.pipeline.OUTPUTS_DIR", tmp_path)
+    monkeypatch.setattr("app.api.routes.pipe.run_pipeline", MagicMock())
+    client = TestClient(app)
+    res = client.post(
+        "/api/jobs",
+        files={"file": ("cat.png", b"abc", "image/png")},
+        data={"parse_channel": "deepseek_direct"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["meta"]["parse_channel"] == "deepseek_direct"
+
+
+def test_api_from_url_rejects_deepseek_direct():
+    client = TestClient(app)
+    res = client.post(
+        "/api/jobs/from-url",
+        json={"url": "https://example.com/cat.png", "parse_channel": "deepseek_direct"},
+    )
+    assert res.status_code == 400
+    assert "upload-only" in res.json()["detail"].lower()
+
+
 def test_parse_document_for_channel_rejects_gemini_direct():
     with pytest.raises(RuntimeError, match="does not produce a ParsedDocument"):
         _parse_document_for_channel(Path("x.png"), "x.png", ParseChannel.gemini_direct, None)
+
+
+def test_parse_document_for_channel_rejects_deepseek_direct():
+    with pytest.raises(RuntimeError, match="does not produce a ParsedDocument"):
+        _parse_document_for_channel(Path("x.png"), "x.png", ParseChannel.deepseek_direct, None)

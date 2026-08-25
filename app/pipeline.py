@@ -24,6 +24,7 @@ from app.stages.crawl import (
     normalize_url,
     parsed_document_from_markdown,
 )
+from app.stages.extract_deepseek_direct import extract_products_deepseek_direct
 from app.stages.extract_gemini import extract_products_gemini
 from app.stages.extract_gemini_direct import (
     DirectQualityReport,
@@ -60,7 +61,8 @@ def _resolve_parse_channel(value: str | ParseChannel | None) -> ParseChannel:
         return ParseChannel(normalized)
     except ValueError as exc:
         raise ValueError(
-            f"Unsupported parse channel '{raw}'. Use paddleocr, gemini, gemini_direct, or unlimited_ocr."
+            f"Unsupported parse channel '{raw}'. Use paddleocr, gemini, "
+            "gemini_direct, unlimited_ocr, or deepseek_direct."
         ) from exc
 
 
@@ -444,6 +446,65 @@ def _skip_parse_for_direct(job_id: str) -> None:
     )
 
 
+def _page_count_from_candidates(candidates: list[CandidateProduct]) -> int | None:
+    pages = [c.page for c in candidates if c.page is not None]
+    return max(pages) if pages else None
+
+
+def _skip_parse_for_deepseek_direct(job_id: str) -> None:
+    _set_stage(job_id, STAGE_PARSE, StageStatus.skipped)
+    _emit_progress(
+        job_id,
+        STAGE_PARSE,
+        "skipped",
+        "Skipping document parse — DeepSeek Vision direct extraction from original image",
+        percent=1,
+        detail={"parse_channel": ParseChannel.deepseek_direct.value},
+    )
+
+
+def _run_deepseek_direct_extract_validate(
+    job_id: str,
+    on_progress: ProgressCallback,
+    *,
+    source: Path,
+) -> None:
+    _update_job(job_id, status=JobStatus.extracting)
+    _set_stage(job_id, STAGE_EXTRACT, StageStatus.running)
+    _emit_progress(
+        job_id,
+        STAGE_EXTRACT,
+        "start",
+        "Starting DeepSeek Vision direct product extraction…",
+        percent=56,
+        detail={"parse_channel": ParseChannel.deepseek_direct.value},
+    )
+    with trace_span(
+        "pipeline.stage.extract",
+        run_type="tool",
+        metadata={
+            "job_id": job_id,
+            "stage": STAGE_EXTRACT,
+            "channel": ParseChannel.deepseek_direct.value,
+            "source_type": "file",
+        },
+        tags=["pipeline", "extract", "deepseek_direct"],
+    ):
+        candidates = extract_products_deepseek_direct(source, on_progress=on_progress)
+    _update_job(
+        job_id,
+        page_count=_page_count_from_candidates(candidates),
+        parsed_preview=None,
+    )
+    _persist_candidates_and_validate(
+        job_id,
+        candidates,
+        parsed=None,
+        on_progress=on_progress,
+        quality=None,
+    )
+
+
 def _parse_document_for_channel(
     source: Path,
     filename: str,
@@ -454,6 +515,8 @@ def _parse_document_for_channel(
         return parse_document_gemini(source, source_filename=filename, on_progress=on_progress)
     if parse_channel == ParseChannel.gemini_direct:
         raise RuntimeError("gemini_direct does not produce a ParsedDocument")
+    if parse_channel == ParseChannel.deepseek_direct:
+        raise RuntimeError("deepseek_direct does not produce a ParsedDocument")
     if parse_channel == ParseChannel.unlimited_ocr:
         return parse_document_unlimited_ocr(source, source_filename=filename, on_progress=on_progress)
     return parse_document(source, source_filename=filename, on_progress=on_progress)
@@ -483,6 +546,9 @@ def run_pipeline(job_id: str) -> None:
             if parse_channel == ParseChannel.gemini_direct:
                 _skip_parse_for_direct(job_id)
                 _run_direct_extract_validate(job_id, on_progress, source=source)
+            elif parse_channel == ParseChannel.deepseek_direct:
+                _skip_parse_for_deepseek_direct(job_id)
+                _run_deepseek_direct_extract_validate(job_id, on_progress, source=source)
             else:
                 _update_job(job_id, status=JobStatus.parsing)
                 _set_stage(job_id, STAGE_PARSE, StageStatus.running)

@@ -26,6 +26,7 @@ class ParseChannel(str, Enum):
     gemini = "gemini"
     gemini_direct = "gemini_direct"
     unlimited_ocr = "unlimited_ocr"
+    deepseek_direct = "deepseek_direct"
 
 
 class StageStatus(str, Enum):

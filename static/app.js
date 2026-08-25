@@ -32,16 +32,23 @@
     if (checked?.value === "gemini") return "gemini";
     if (checked?.value === "gemini_direct") return "gemini_direct";
     if (checked?.value === "unlimited_ocr") return "unlimited_ocr";
+    if (checked?.value === "deepseek_direct") return "deepseek_direct";
     return "paddleocr";
   }
 
   const ACCEPT_IMAGE_PDF = ".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff";
   const ACCEPT_GEMINI_TEXT = ",.csv,.txt,.md,.html,.htm,.xml,.json,.rtf";
+  const ACCEPT_DEEPSEEK_VISION = ".png,.jpg,.jpeg,.gif,.webp";
 
   function syncFileAccept() {
     const channel = selectedParseChannel();
     const dropHint = document.getElementById("dropHint");
-    if (channel === "gemini" || channel === "gemini_direct") {
+    if (channel === "deepseek_direct") {
+      fileInput.accept = ACCEPT_DEEPSEEK_VISION;
+      if (dropHint) {
+        dropHint.textContent = "or click to browse · PNG, JPG, GIF, WebP only";
+      }
+    } else if (channel === "gemini" || channel === "gemini_direct") {
       fileInput.accept = ACCEPT_IMAGE_PDF + ACCEPT_GEMINI_TEXT;
       if (dropHint) {
         dropHint.textContent =
@@ -59,6 +66,7 @@
     if (channel === "gemini") return "Gemini Vision";
     if (channel === "gemini_direct") return "Gemini Direct";
     if (channel === "unlimited_ocr") return "Unlimited OCR";
+    if (channel === "deepseek_direct") return "DeepSeek Vision Direct";
     return "PaddleOCR";
   }
 
@@ -68,6 +76,8 @@
       parseStageHint.textContent = "Gemini Vision → structure only";
     } else if (channel === "gemini_direct") {
       parseStageHint.textContent = "skipped — original file → products";
+    } else if (channel === "deepseek_direct") {
+      parseStageHint.textContent = "skipped — original image → products (DeepSeek Vision)";
     } else if (channel === "unlimited_ocr") {
       parseStageHint.textContent = "Unlimited-OCR markdown → structure only";
     } else {
