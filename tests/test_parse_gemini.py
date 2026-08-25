@@ -9,7 +9,6 @@ import pytest
 from PIL import Image
 
 from app.config import settings
-from app.stages import parse_gemini as parse_mod
 from app.stages.parse_gemini import (
     _bbox_from_list,
     _extract_json_text,
@@ -163,7 +162,7 @@ def test_parse_document_gemini_pdf_inline(tmp_path, monkeypatch):
 def test_parse_document_gemini_files_api_for_large_file(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "gemini_api_key", "test-key")
     monkeypatch.setattr(settings, "gemini_model", "gemini-2.5-flash")
-    monkeypatch.setattr(parse_mod, "_INLINE_MAX_BYTES", 100)
+    monkeypatch.setattr(settings, "gemini_inline_max_bytes", 100)
 
     pdf_path = tmp_path / "big.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n" + (b"x" * 200))

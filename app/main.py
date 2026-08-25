@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router
 from app.config import STATIC_DIR
+from app.observability.langsmith import configure_langsmith
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +27,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
+configure_langsmith()
 app.include_router(router)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

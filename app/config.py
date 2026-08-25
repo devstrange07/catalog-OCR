@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-v4-flash"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    gemini_inline_max_bytes: int = 2 * 1024 * 1024  # 2 MB
     parse_channel_default: str = "paddleocr"
     ocr_lang: str = "en"
     ocr_use_gpu: bool = False
@@ -27,7 +28,13 @@ class Settings(BaseSettings):
     port: int = 8000
     max_extract_chars: int = 24000
     extract_pages_per_chunk: int = 2
-    extract_max_tokens: int = 8192
+    extract_max_tokens: int = 32768
+    validate_coverage_repair: bool = False
+    langsmith_enabled: bool = False
+    langsmith_api_key: str = ""
+    langsmith_project: str = "product-ocr"
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    langsmith_tracing_v2: bool = True
     crawl_timeout_sec: int = 60
     crawl_headless: bool = True
     unlimited_ocr_model: str = "baidu/Unlimited-OCR"

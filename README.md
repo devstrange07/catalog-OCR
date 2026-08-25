@@ -2,8 +2,8 @@
 
 3-stage extractor for **catalogs and pamphlets**:
 
-1. **Document Parsing** — selectable channel: PaddleOCR + Docling, Gemini Vision (`gemini-2.5-flash`), or Unlimited-OCR (`baidu/Unlimited-OCR` via HF transformers, CUDA GPU) → `ParsedDocument` only  
-2. **Product Extraction** — `gemini-2.5-flash` structured JSON (`products` array) → candidates (all parse channels)  
+1. **Document Parsing** — selectable channel: PaddleOCR + Docling, Gemini Vision (`gemini-2.5-flash`), Unlimited-OCR (`baidu/Unlimited-OCR` via HF transformers, CUDA GPU) → `ParsedDocument` only; **or** `gemini_direct` which skips this stage  
+2. **Product Extraction** — `gemini-2.5-flash` structured JSON (`products` array) from parsed text (all parse channels except `gemini_direct`); `gemini_direct` sends the **original file** to Gemini with the same product schema  
 3. **Validation** — Pydantic + business rules → final `ProductRecord`s  
 
 **Hard rule:** OCR/parsing never emits the final product record. Products come only from the LLM structured output, then validation.
@@ -31,7 +31,8 @@ Set `GEMINI_API_KEY` in `.env` (required for Stage 2 on all channels, and for Ge
 Optional Gemini settings:
 - `GEMINI_API_KEY` — required for Stage-2 extraction always; also required when parse channel is `gemini` or `unlimited_ocr`
 - `GEMINI_MODEL` — defaults to `gemini-2.5-flash`
-- `PARSE_CHANNEL_DEFAULT` — defaults to `paddleocr` (options: `paddleocr`, `gemini`, `unlimited_ocr`)
+- `EXTRACT_MAX_TOKENS` — max Gemini direct output tokens (default `32768`)
+- `PARSE_CHANNEL_DEFAULT` — defaults to `paddleocr` (options: `paddleocr`, `gemini`, `gemini_direct`, `unlimited_ocr`)
 - `OCR_USE_GPU` — set `true` to request CUDA for PaddleOCR
 - `OCR_GPU_ID` — CUDA device index (default `0`)
 
@@ -49,6 +50,26 @@ Optional Unlimited-OCR channel settings (local CUDA **or** Colab remote):
 - `UNLIMITED_OCR_REMOTE_TIMEOUT_SEC` — per-page HTTP timeout (default `180`)
 
 Optional crawl settings: `CRAWL_TIMEOUT_SEC`, `CRAWL_HEADLESS`.
+
+## Observability (LangSmith)
+
+LangSmith tracing is optional and non-blocking. If telemetry fails, jobs still run.
+
+Add to `.env`:
+
+```env
+LANGSMITH_ENABLED=true
+LANGSMITH_API_KEY=your_langsmith_key
+LANGSMITH_PROJECT=product-ocr
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_TRACING_V2=true
+```
+
+Signals captured:
+- root job traces for upload and URL pipelines
+- stage spans (`crawl`, `parse`, `extract`, `validate`)
+- Gemini transport spans (`inline` vs `files_api`, upload/delete)
+- Gemini direct attempt/retry spans and generate assertions (`finishReason`, prompt blocks)
 
 ## Optional: Unlimited-OCR via Colab (POC)
 
@@ -116,7 +137,7 @@ Open [http://localhost:8000](http://localhost:8000).
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/health` | Health check |
-| POST | `/api/jobs` | Upload PDF/image (`multipart` field `file`, optional `parse_channel`: `paddleocr`/`gemini`/`unlimited_ocr`) |
+| POST | `/api/jobs` | Upload PDF/image (`multipart` field `file`, optional `parse_channel`: `paddleocr`/`gemini`/`gemini_direct`/`unlimited_ocr`) |
 | POST | `/api/jobs/from-url` | JSON `{ "url": "https://..." }`, optional `parse_channel` |
 | GET | `/api/jobs/{id}` | Job status, stages, products |
 | GET | `/api/jobs/{id}/artifacts/{name}` | `crawl.json` (URL jobs) / `parsed.json` / `candidates.json` / `products.json` |
@@ -150,9 +171,13 @@ Drop your own catalog PDFs or images into `samples/`. Nothing is bundled (copyri
   - `ocr_use_gpu_requested`: requested GPU mode from config
   - `ocr_gpu_id_requested`: requested GPU id
 - Docling is used for PDF layout/markdown; its own OCR is disabled because PaddleOCR is primary. Image-only Docling failures are non-fatal — extraction still uses PaddleOCR text.
-- Gemini channel sends the **original** file to Gemini in one request (no local page rasterization). Files ≤ 15 MB go as `inline_data` with the correct MIME; larger files use the Gemini Files API (`file_data`). Besides PDF/images, Gemini Stage 1 also accepts text formats: `.csv`, `.txt`, `.md`, `.html`, `.htm`, `.xml`, `.json`, `.rtf` (text-as-text; not visual layout). These text types are **Gemini-channel only** — PaddleOCR/Unlimited-OCR uploads reject them. `.xlsx` / `.doc` / `.docx` are **not** supported (Gemini rejects Office Open XML MIME types). If `GEMINI_API_KEY` is missing and channel is `gemini`, Stage-1 fails clearly.
+- Gemini channel (`parse_channel=gemini`) sends the **original** file to Gemini in one request (no local page rasterization) and emits `ParsedDocument` only, then Stage 2 extracts products from that text. Files ≤ `GEMINI_INLINE_MAX_BYTES` (default 2 MB) go as `inline_data` with the correct MIME; larger files use the Gemini Files API (`file_data`). Besides PDF/images, Gemini Stage 1 also accepts text formats: `.csv`, `.txt`, `.md`, `.html`, `.htm`, `.xml`, `.json`, `.rtf` (text-as-text; not visual layout). These text types are **Gemini-native channels only** (`gemini` and `gemini_direct`) — PaddleOCR/Unlimited-OCR uploads reject them. `.xlsx` / `.doc` / `.docx` are **not** supported (Gemini rejects Office Open XML MIME types). If `GEMINI_API_KEY` is missing and channel is `gemini`, Stage-1 fails clearly.
+- Gemini Direct (`parse_channel=gemini_direct`) skips `ParsedDocument` and Stage 2 text extraction. The original file (or crawl4ai markdown for HTML page URLs) is sent once with the existing product `responseSchema`. Stage 3 validation still runs. Empty `{"products":[]}` is a successful job, not an API failure. Truncation (`MAX_TOKENS`) and safety blocks fail the job. Output is capped by `EXTRACT_MAX_TOKENS` (default 32768); thinking stays on (`thinkingBudget=-1`). Set `EXTRACT_MAX_TOKENS=65536` if dense catalogs still hit `MAX_TOKENS`.
+  - Prompt version `gemini_direct_v2` prioritizes complete SKU/table rows over cover summaries and requires labeled `price_tiers` for city/matrix prices.
+  - After the first generation, a deterministic completeness check may trigger **one** focused repair call against the same file part (not a ParsedDocument / Stage-2 fallback). Hollow SKU rows (ID without price/area/project) are the main trigger.
+  - Stage 3 `status=validated` remains schema/business validation only. Direct completeness issues are surfaced as product `warnings` and `job.meta.direct_quality` — they do **not** flip `validated` → `rejected`. Spatial OCR-row checks are skipped because there is no `ParsedDocument`.
 - Unlimited-OCR channel runs `baidu/Unlimited-OCR` via HF `transformers` (local CUDA) **or** a Colab-hosted endpoint (e.g. Cloudflare quick tunnel) when `UNLIMITED_OCR_REMOTE_URL` is set. It produces per-page markdown. A local CUDA GPU is required only when no remote URL is configured. `transformers>=4.57.0,<4.58.0` is pinned per the model card; this may conflict with Docling's own transformers dependency — use a fresh venv if pip resolution fails.
-- Stage 2 always uses Gemini structured JSON (`GEMINI_MODEL`, default `gemini-2.5-flash`). Missing `GEMINI_API_KEY` fails Stage 2 clearly — it will not invent products from OCR.
+- Stage 2 uses Gemini structured JSON (`GEMINI_MODEL`, default `gemini-2.5-flash`) for every channel except `gemini_direct`, which extracts products in the extract stage from the original file. Missing `GEMINI_API_KEY` fails extraction clearly — it will not invent products from OCR.
 - Product schema is domain-agnostic (retail, SaaS, B2B, menus, healthcare, listings, etc.):
   - `item_type`: product | service | bundle | plan | event | addon | listing | announcement | other
   - `availability` (market status) is separate from pipeline `status` (validated | rejected)

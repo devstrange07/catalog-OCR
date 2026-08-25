@@ -517,3 +517,244 @@ def test_realy_bleed_pattern_is_flagged():
     assert len(promo_warned) >= 6  # club on 7 of 8 items across projects
     assert len(cond_warned) == len(records)
     assert all(r.confidence is not None and r.confidence <= 0.8 for r in cond_warned)
+
+
+def test_normalize_price_applies_scale_suffixes():
+    records = validate_products(
+        [
+            CandidateProduct(name="A", price="10.5 Lakh", currency="INR"),
+            CandidateProduct(name="B", price="2 Cr", currency="INR"),
+            CandidateProduct(name="C", price="99K", currency="USD"),
+            CandidateProduct(name="D", price="$12.50", currency="USD"),
+            CandidateProduct(
+                name="E",
+                price=100,
+                price_tiers=[PriceTier(label="EMI", price="0.6 L")],
+            ),
+        ]
+    )
+    assert records[0].price == 1_050_000.0
+    assert any("scale suffix" in w.lower() for w in records[0].warnings)
+    assert records[1].price == 20_000_000.0
+    assert records[2].price == 99_000.0
+    assert records[3].price == 12.5
+    assert records[4].price_tiers is not None
+    assert records[4].price_tiers[0].price == 60_000.0
+
+
+def test_flag_asymmetric_table_conditions():
+    shared_shape = {"category": "Rate Card", "page": 1, "currency": "INR"}
+    candidates = [
+        CandidateProduct(
+            name=f"Left-{i}",
+            project_name="Tower A",
+            price=100 + i,
+            conditions=["* Rates excl. tax"],
+            **shared_shape,
+        )
+        for i in range(3)
+    ] + [
+        CandidateProduct(
+            name=f"Right-{i}",
+            project_name="Tower B",
+            price=200 + i,
+            **shared_shape,
+        )
+        for i in range(3)
+    ]
+    records = validate_products(candidates)
+    right = [r for r in records if r.project_name == "Tower B"]
+    assert all(
+        any("possible missed footnote" in w for w in r.warnings) for r in right
+    )
+
+
+def test_flag_snippet_coverage_gap():
+    records = validate_products(
+        [
+            CandidateProduct(
+                name="3BHK Flat",
+                price=1_000_000,
+                source_snippet="3BHK with free club membership and 10% booking",
+                includes=None,
+                conditions=None,
+            )
+        ]
+    )
+    warnings = records[0].warnings
+    assert any("free" in w.lower() and "structured field" in w for w in warnings)
+    assert any("10%" in w and "structured field" in w for w in warnings)
+
+
+def test_flag_snippet_skips_already_scaled_price():
+    records = validate_products(
+        [
+            CandidateProduct(
+                name="Apartments",
+                price="1.05 Cr",
+                currency="INR",
+                source_snippet="Apartments from 1.05 Cr",
+            )
+        ]
+    )
+    assert records[0].price == 10_500_000.0
+    assert any("scale suffix" in w.lower() for w in records[0].warnings)
+    assert not any("1.05 Cr" in w and "structured field" in w for w in records[0].warnings)
+
+
+def test_flag_magnitude_inconsistency_on_emi_scale():
+    candidates = [
+        CandidateProduct(
+            name=f"Unit-{i}",
+            project_name="Skyline",
+            category="Apartments",
+            price=10_000_000,
+            currency="INR",
+            price_tiers=[
+                PriceTier(label="EMI", price=60_000 if i < 2 else 0.6),
+            ],
+        )
+        for i in range(3)
+    ]
+    records = validate_products(candidates)
+    assert all(
+        any("implausible range" in w for w in r.warnings) for r in records
+    )
+
+
+def test_flag_currency_inconsistency_same_section():
+    records = validate_products(
+        [
+            CandidateProduct(
+                name="A",
+                project_name="Skyline",
+                category="Apartments",
+                price=100,
+                currency="INR",
+            ),
+            CandidateProduct(
+                name="B",
+                project_name="Skyline",
+                category="Apartments",
+                price=200,
+                currency="USD",
+            ),
+        ]
+    )
+    assert all(any("Mixed currencies" in w for w in r.warnings) for r in records)
+    assert all(r.status == ProductStatus.validated for r in records)
+
+
+def test_flag_category_shape_drift():
+    candidates = [
+        CandidateProduct(
+            name=f"Item-{i}",
+            category="Apartments",
+            project_name="P1",
+            price=100 + i,
+        )
+        for i in range(3)
+    ] + [
+        CandidateProduct(
+            name="Odd",
+            category="Price Comparison Table Overview",
+            project_name="P2",
+            price=999,
+        )
+    ]
+    records = validate_products(candidates)
+    odd = next(r for r in records if r.name == "Odd")
+    assert any("taxonomy label" in w for w in odd.warnings)
+
+
+def test_flag_missing_derivable_rate():
+    candidates = [
+        CandidateProduct(
+            name="A",
+            project_name="Tower",
+            category="Apartments",
+            price=10_800_000,
+            pack_size="1080 sqft",
+            price_tiers=[PriceTier(label="per sqft", price=10_000)],
+        ),
+        CandidateProduct(
+            name="B",
+            project_name="Tower",
+            category="Apartments",
+            price=12_000_000,
+            pack_size="1200 sqft",
+        ),
+    ]
+    records = validate_products(candidates)
+    assert any(
+        "computable but missing" in w for w in records[1].warnings
+    )
+    assert not any(
+        "computable but missing" in w for w in records[0].warnings
+    )
+
+
+def test_flag_unclaimed_footnote_block():
+    parsed = ParsedDocument(
+        source_filename="rates.pdf",
+        source_path="rates.pdf",
+        page_count=1,
+        pages=[
+            ParsedPage(
+                page_number=1,
+                blocks=[
+                    TextBlock(
+                        block_id="p1-b0",
+                        text="Widget A",
+                        bbox=BBox(x0=10, y0=10, x1=60, y1=20),
+                        row_id=0,
+                    ),
+                    TextBlock(
+                        block_id="p1-b1",
+                        text="* Prices exclude GST",
+                        bbox=BBox(x0=10, y0=40, x1=120, y1=50),
+                        row_id=2,
+                    ),
+                ],
+            )
+        ],
+    )
+    records = validate_products(
+        [
+            CandidateProduct(
+                name="Widget A",
+                page=1,
+                price=100,
+                source_snippet="Widget A 100",
+            )
+        ],
+        parsed=parsed,
+    )
+    assert any("unattached table footnote" in w for w in records[0].warnings)
+
+
+def test_coverage_repair_fills_empty_includes_only():
+    from app.stages.coverage_repair import apply_coverage_repair_payload
+
+    records = validate_products(
+        [
+            CandidateProduct(
+                name="Plan",
+                price=99,
+                source_snippet="Plan includes free onboarding",
+                includes=["already kept"],
+            )
+        ]
+    )
+    apply_coverage_repair_payload(
+        records[0],
+        {
+            "includes": ["should not overwrite"],
+            "conditions": ["from snippet"],
+            "description": "filled",
+        },
+    )
+    assert records[0].includes == ["already kept"]
+    assert records[0].conditions == ["from snippet"]
+    assert records[0].description == "filled"
+    assert any("Coverage repair" in w for w in records[0].warnings)
